@@ -167,25 +167,84 @@ async function refreshInbox() {
   }
 }
 
+function normalizeSidebarLabel(value) {
+  return (value || '').replace(/\s+/g, '');
+}
+
+function isSidebarLabelMatch(value, label) {
+  const normalizedValue = normalizeSidebarLabel(value);
+  const normalizedLabel = normalizeSidebarLabel(label);
+
+  if (!normalizedValue || !normalizedLabel) {
+    return false;
+  }
+
+  if (normalizedValue === normalizedLabel) {
+    return true;
+  }
+
+  return normalizedValue.replace(/\d+$/, '') === normalizedLabel;
+}
+
+function getSidebarFolderLabel(el) {
+  if (!el) {
+    return '';
+  }
+
+  if (typeof el.querySelector === 'function') {
+    const labelNode = el.querySelector('.sidebar-menu-text');
+    if (labelNode?.textContent) {
+      return labelNode.textContent;
+    }
+  }
+
+  if (typeof el.getAttribute === 'function') {
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel) {
+      return ariaLabel;
+    }
+
+    const title = el.getAttribute('title');
+    if (title) {
+      return title;
+    }
+  }
+
+  return el.textContent || '';
+}
+
 function findSidebarFolderByLabel(label) {
-  const normalizedLabel = label.replace(/\s+/g, '');
-  const candidates = document.querySelectorAll('a, button, span, div');
+  const folderRows = document.querySelectorAll('.sidebar-menus .frame-sidebar-menu, .frame-sidebar-menu[data-sidebar-dir-id]');
+
+  for (const row of folderRows) {
+    if (isSidebarLabelMatch(getSidebarFolderLabel(row), label)) {
+      return resolveClickableFolderElement(row, label);
+    }
+  }
+
+  const labelNodes = document.querySelectorAll('.sidebar-menus .sidebar-menu-text, .sidebar-menu-text, [aria-label], [title]');
+
+  for (const el of labelNodes) {
+    if (isSidebarLabelMatch(getSidebarFolderLabel(el), label)) {
+      return resolveClickableFolderElement(el, label);
+    }
+  }
+
+  const candidates = document.querySelectorAll('a, button, [role="button"], [role="link"], div, span');
 
   for (const el of candidates) {
-    const text = (el.textContent || '').replace(/\s+/g, '');
-    const title = (el.getAttribute('title') || '').replace(/\s+/g, '');
-    if (text.includes(normalizedLabel) || title.includes(normalizedLabel)) {
-      return resolveClickableFolderElement(el);
+    if (isSidebarLabelMatch(getSidebarFolderLabel(el), label)) {
+      return resolveClickableFolderElement(el, label);
     }
   }
 
   return null;
 }
 
-function resolveClickableFolderElement(el) {
+function resolveClickableFolderElement(el, label) {
   if (!el) return null;
 
-  const clickableSelector = 'a, button, [role="button"], [role="link"], [tabindex], [onclick]';
+  const clickableSelector = 'a, button, [role="button"], [role="link"], [tabindex], [onclick], [data-a11y="button"], [data-sidebar-dir-id], .frame-sidebar-menu';
   if (typeof el.closest === 'function') {
     const clickableAncestor = el.closest(clickableSelector);
     if (clickableAncestor) {
@@ -195,6 +254,14 @@ function resolveClickableFolderElement(el) {
 
   let current = el;
   for (let depth = 0; current && depth < 4; depth++) {
+    if (isSidebarLabelMatch(getSidebarFolderLabel(current), label)) {
+      const hasSidebarDirId = typeof current.getAttribute === 'function' && current.getAttribute('data-sidebar-dir-id');
+      const className = typeof current.className === 'string' ? current.className : '';
+      if (hasSidebarDirId || /\bframe-sidebar-menu\b/.test(className)) {
+        return current;
+      }
+    }
+
     const className = typeof current.className === 'string' ? current.className : '';
     if (/(folder|nav|menu|item|tab)/i.test(className)) {
       return current;
@@ -225,6 +292,14 @@ async function refreshViaSidebarFolders() {
   }
 
   return clickedAny;
+}
+
+if (globalThis.__MULTIPAGE_TEST_HOOKS) {
+  globalThis.__MULTIPAGE_TEST_HOOKS.qqMail = {
+    findSidebarFolderByLabel,
+    resolveClickableFolderElement,
+    refreshViaSidebarFolders,
+  };
 }
 
 // ============================================================
