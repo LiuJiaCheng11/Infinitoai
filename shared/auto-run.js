@@ -14,9 +14,39 @@
     return typeof error === 'string' ? error : error?.message || '';
   }
 
+  function sanitizeRunCounter(value) {
+    const numeric = Number.parseInt(String(value ?? '').trim(), 10);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+      return 0;
+    }
+    return numeric;
+  }
+
   function shouldContinueAutoRunAfterError(error) {
     const message = getErrorMessage(error);
     return message !== STOP_ERROR_MESSAGE && message !== AUTO_RUN_HANDOFF_MESSAGE;
+  }
+
+  function buildAutoRunStatusPayload({
+    phase,
+    currentRun,
+    totalRuns,
+    infiniteMode = false,
+    successfulRuns = 0,
+    failedRuns = 0,
+    summaryMessage = '',
+    summaryToast = '',
+  }) {
+    return {
+      phase,
+      currentRun,
+      totalRuns,
+      infiniteMode: Boolean(infiniteMode),
+      successfulRuns: sanitizeRunCounter(successfulRuns),
+      failedRuns: sanitizeRunCounter(failedRuns),
+      summaryMessage,
+      summaryToast,
+    };
   }
 
   function summarizeAutoRunResult({
@@ -60,6 +90,7 @@
   }
 
   return {
+    buildAutoRunStatusPayload,
     shouldContinueAutoRunAfterError,
     summarizeAutoRunResult,
   };

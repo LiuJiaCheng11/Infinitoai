@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildAutoRunStatusPayload,
   shouldContinueAutoRunAfterError,
   summarizeAutoRunResult,
 } = require('../shared/auto-run.js');
@@ -75,6 +76,29 @@ test('infinite auto run stop summary reports completed rounds before stop', () =
       phase: 'stopped',
       message: '=== Infinite auto run stopped after 6 runs (4 succeeded, 2 failed) ===',
       toastMessage: '无限自动运行已停止：成功 4 次，失败 2 次',
+    }
+  );
+});
+
+test('buildAutoRunStatusPayload always includes sanitized success and failure counters', () => {
+  assert.deepEqual(
+    buildAutoRunStatusPayload({
+      phase: 'running',
+      currentRun: 2,
+      totalRuns: 5,
+      infiniteMode: false,
+      successfulRuns: '3',
+      failedRuns: -1,
+    }),
+    {
+      phase: 'running',
+      currentRun: 2,
+      totalRuns: 5,
+      infiniteMode: false,
+      successfulRuns: 3,
+      failedRuns: 0,
+      summaryMessage: '',
+      summaryToast: '',
     }
   );
 });

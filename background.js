@@ -1,6 +1,6 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js');
+importScripts('data/names.js', 'shared/flow-runner.js', 'shared/runtime-errors.js', 'shared/auto-run.js', 'shared/duck-mail-errors.js', 'shared/sidepanel-settings.js', 'shared/tab-reclaim.js');
 
 const LOG_PREFIX = '[MultiPage:bg]';
 const DUCK_AUTOFILL_URL = 'https://duckduckgo.com/email/settings/autofill';
@@ -10,8 +10,9 @@ const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const { runStepSequence } = FlowRunner;
 const { isMessageChannelClosedError } = RuntimeErrors;
-const { shouldContinueAutoRunAfterError, summarizeAutoRunResult } = AutoRun;
+const { buildAutoRunStatusPayload, shouldContinueAutoRunAfterError, summarizeAutoRunResult } = AutoRun;
 const { addDuckMailRetryHint } = DuckMailErrors;
+const { buildReclaimableTabRegistry } = TabReclaim;
 const {
   DEFAULT_AUTO_RUN_COUNT,
   DEFAULT_AUTO_RUN_INFINITE,
@@ -20,6 +21,32 @@ const {
   sanitizeAutoRunCount,
   sanitizeInfiniteAutoRun,
 } = SidepanelSettings;
+
+const RECLAIM_SOURCE_CONFIG = {
+  'signup-page': {
+    readyOnClaim: true,
+  },
+  'qq-mail': {
+    readyOnClaim: true,
+  },
+  'mail-163': {
+    readyOnClaim: true,
+  },
+  'duck-mail': {
+    readyOnClaim: true,
+  },
+  'inbucket-mail': {
+    readyOnClaim: false,
+    loadedMarker: '__MULTIPAGE_INBUCKET_MAIL_LOADED',
+    injectSource: 'inbucket-mail',
+    inject: ['shared/mail-matching.js', 'shared/mail-freshness.js', 'shared/latest-mail.js', 'content/utils.js', 'content/inbucket-mail.js'],
+  },
+  'vps-panel': {
+    readyOnClaim: false,
+    loadedMarker: '__MULTIPAGE_VPS_PANEL_LOADED',
+    inject: ['content/utils.js', 'content/vps-panel.js'],
+  },
+};
 
 initializeSessionStorageAccess();
 
@@ -76,6 +103,10 @@ const DEFAULT_STATE = {
   inbucketMailbox: '',
   autoRunCount: DEFAULT_AUTO_RUN_COUNT,
   autoRunInfinite: DEFAULT_AUTO_RUN_INFINITE,
+  autoRunStats: {
+    successfulRuns: 0,
+    failedRuns: 0,
+  },
 };
 
 async function getState() {
@@ -162,6 +193,7 @@ async function resetState() {
       'seenInbucketMailIds',
       'accounts',
       'tabRegistry',
+      'autoRunStats',
       'customPassword',
     ]),
     getPersistentSettings(),
@@ -174,6 +206,7 @@ async function resetState() {
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
+    autoRunStats: prev.autoRunStats || DEFAULT_STATE.autoRunStats,
     customPassword: prev.customPassword || '',
   });
 }
@@ -209,35 +242,148 @@ function generatePassword() {
 // ============================================================
 
 async function getTabRegistry() {
-  const state = await getState();
-  return state.tabRegistry || {};
+  return await ensureTabRegistryRecovered();
 }
 
 async function registerTab(source, tabId) {
-  const registry = await getTabRegistry();
+  const state = await getState();
+  const registry = state.tabRegistry || {};
   registry[source] = { tabId, ready: true };
   await setState({ tabRegistry: registry });
   console.log(LOG_PREFIX, `Tab registered: ${source} -> ${tabId}`);
 }
 
 async function isTabAlive(source) {
-  const registry = await getTabRegistry();
-  const entry = registry[source];
+  let registry = await ensureTabRegistryRecovered(source);
+  let entry = registry[source];
   if (!entry) return false;
+
   try {
     await chrome.tabs.get(entry.tabId);
     return true;
   } catch {
-    // Tab no longer exists — clean up registry
-    registry[source] = null;
+    delete registry[source];
+    await setState({ tabRegistry: registry });
+  }
+
+  registry = await ensureTabRegistryRecovered(source);
+  entry = registry[source];
+  if (!entry) return false;
+
+  try {
+    await chrome.tabs.get(entry.tabId);
+    return true;
+  } catch {
+    delete registry[source];
     await setState({ tabRegistry: registry });
     return false;
   }
 }
 
 async function getTabId(source) {
-  const registry = await getTabRegistry();
+  const registry = await ensureTabRegistryRecovered(source);
   return registry[source]?.tabId || null;
+}
+
+function getReclaimSourceConfig(source) {
+  return RECLAIM_SOURCE_CONFIG[source] || { readyOnClaim: false };
+}
+
+async function isInjectedContentScriptLoaded(tabId, markerName) {
+  if (!markerName) return false;
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (name) => Boolean(window[name]),
+      args: [markerName],
+    });
+    return Boolean(results?.[0]?.result);
+  } catch (err) {
+    console.warn(LOG_PREFIX, `Could not probe restored tab ${tabId} for ${markerName}:`, err?.message || err);
+    return false;
+  }
+}
+
+async function prepareReclaimedTab(source, tabId) {
+  const config = getReclaimSourceConfig(source);
+
+  if (!config.inject?.length) {
+    return config.readyOnClaim;
+  }
+
+  const alreadyLoaded = await isInjectedContentScriptLoaded(tabId, config.loadedMarker);
+  if (alreadyLoaded) {
+    return true;
+  }
+
+  try {
+    if (config.injectSource) {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (injectedSource) => {
+          window.__MULTIPAGE_SOURCE = injectedSource;
+        },
+        args: [config.injectSource],
+      });
+    }
+
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: config.inject,
+    });
+  } catch (err) {
+    console.warn(LOG_PREFIX, `Failed to inject restored ${source} tab ${tabId}:`, err?.message || err);
+  }
+
+  return false;
+}
+
+async function ensureTabRegistryRecovered(requiredSource = null) {
+  const state = await getState();
+  const registry = state.tabRegistry || {};
+
+  if (!requiredSource && Object.keys(registry).length > 0) {
+    return registry;
+  }
+
+  if (requiredSource && registry[requiredSource]?.tabId) {
+    return registry;
+  }
+
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (err) {
+    console.warn(LOG_PREFIX, 'Failed to query tabs for reclaim:', err?.message || err);
+    return registry;
+  }
+
+  const reclaimedRegistry = buildReclaimableTabRegistry(tabs, state);
+  if (requiredSource && !reclaimedRegistry[requiredSource]) {
+    return registry;
+  }
+
+  const nextRegistry = { ...registry };
+  let changed = false;
+
+  for (const [source, entry] of Object.entries(reclaimedRegistry)) {
+    const ready = await prepareReclaimedTab(source, entry.tabId);
+    const nextEntry = { tabId: entry.tabId, ready };
+    const prevEntry = nextRegistry[source];
+    if (!prevEntry || prevEntry.tabId !== nextEntry.tabId || prevEntry.ready !== nextEntry.ready) {
+      nextRegistry[source] = nextEntry;
+      changed = true;
+      console.log(LOG_PREFIX, `Reclaimed restored tab: ${source} -> ${entry.tabId} (ready=${ready})`);
+    }
+  }
+
+  if (changed) {
+    await setState({ tabRegistry: nextRegistry });
+    return nextRegistry;
+  }
+
+  return registry;
 }
 
 // ============================================================
@@ -784,6 +930,32 @@ function notifyStepError(step, error) {
   if (waiter) waiter.reject(new Error(error));
 }
 
+async function setAutoRunStats(successfulRuns, failedRuns) {
+  const nextStats = {
+    successfulRuns: Math.max(0, Number.parseInt(String(successfulRuns ?? 0), 10) || 0),
+    failedRuns: Math.max(0, Number.parseInt(String(failedRuns ?? 0), 10) || 0),
+  };
+  autoRunSuccessfulRuns = nextStats.successfulRuns;
+  autoRunFailedRuns = nextStats.failedRuns;
+  await setState({ autoRunStats: nextStats });
+  return nextStats;
+}
+
+function sendAutoRunStatus(phase, overrides = {}) {
+  chrome.runtime.sendMessage({
+    type: 'AUTO_RUN_STATUS',
+    payload: buildAutoRunStatusPayload({
+      phase,
+      currentRun: autoRunCurrentRun,
+      totalRuns: autoRunTotalRuns,
+      infiniteMode: autoRunInfinite,
+      successfulRuns: autoRunSuccessfulRuns,
+      failedRuns: autoRunFailedRuns,
+      ...overrides,
+    }),
+  }).catch(() => {});
+}
+
 async function handOffPausedAutoRunToManual(step) {
   if (!autoRunActive || !resumeWaiter) {
     return false;
@@ -796,16 +968,7 @@ async function handOffPausedAutoRunToManual(step) {
   await setState({ autoRunning: false });
   await addLog(`Auto run handed off to manual continuation from step ${step}`, 'info');
   waiter.reject(new Error(AUTO_RUN_HANDOFF_MESSAGE));
-
-  chrome.runtime.sendMessage({
-    type: 'AUTO_RUN_STATUS',
-    payload: {
-      phase: 'stopped',
-      currentRun: autoRunCurrentRun,
-      totalRuns: autoRunTotalRuns,
-      infiniteMode: autoRunInfinite,
-    },
-  }).catch(() => {});
+  sendAutoRunStatus('stopped');
 
   return true;
 }
@@ -873,15 +1036,7 @@ async function requestStop() {
   await markRunningStepsStopped();
   autoRunActive = false;
   await setState({ autoRunning: false });
-  chrome.runtime.sendMessage({
-    type: 'AUTO_RUN_STATUS',
-    payload: {
-      phase: 'stopped',
-      currentRun: autoRunCurrentRun,
-      totalRuns: autoRunTotalRuns,
-      infiniteMode: autoRunInfinite,
-    },
-  }).catch(() => {});
+  sendAutoRunStatus('stopped');
 }
 
 // ============================================================
@@ -977,6 +1132,8 @@ let autoRunActive = false;
 let autoRunCurrentRun = 0;
 let autoRunTotalRuns = 1;
 let autoRunInfinite = false;
+let autoRunSuccessfulRuns = 0;
+let autoRunFailedRuns = 0;
 
 // Outer loop: runs the full flow N times
 async function autoRunLoop(totalRuns, infiniteMode = false) {
@@ -989,10 +1146,9 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
   autoRunActive = true;
   autoRunInfinite = Boolean(infiniteMode);
   autoRunTotalRuns = autoRunInfinite ? Number.POSITIVE_INFINITY : totalRuns;
+  await setAutoRunStats(0, 0);
   await setState({ autoRunning: true });
   let handedOffToManual = false;
-  let successfulRuns = 0;
-  let failedRuns = 0;
 
   for (let run = 1; autoRunInfinite || run <= totalRuns; run++) {
     autoRunCurrentRun = run;
@@ -1006,6 +1162,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
       inbucketMailbox: prevState.inbucketMailbox,
       autoRunCount: sanitizeAutoRunCount(prevState.autoRunCount),
       autoRunInfinite: sanitizeInfiniteAutoRun(prevState.autoRunInfinite),
+      autoRunStats: prevState.autoRunStats || { successfulRuns: autoRunSuccessfulRuns, failedRuns: autoRunFailedRuns },
       autoRunning: true,
     };
     await resetState();
@@ -1016,14 +1173,10 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
 
     const runTargetText = autoRunInfinite ? `${run}/∞` : `${run}/${totalRuns}`;
     await addLog(`=== Auto Run ${runTargetText} — Phase 1: Get OAuth link & open signup ===`, 'info');
-    const status = (phase) => ({
-      type: 'AUTO_RUN_STATUS',
-      payload: { phase, currentRun: run, totalRuns: autoRunTotalRuns, infiniteMode: autoRunInfinite },
-    });
 
     try {
       throwIfStopped();
-      chrome.runtime.sendMessage(status('running')).catch(() => {});
+      sendAutoRunStatus('running', { currentRun: run });
 
       await executeStepAndWait(1, 2000);
       await executeStepAndWait(2, 2000);
@@ -1039,7 +1192,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
 
       if (!emailReady) {
         await addLog(`=== Run ${runTargetText} PAUSED: Fetch Duck email or paste manually, then continue ===`, 'warn');
-        chrome.runtime.sendMessage(status('waiting_email')).catch(() => {});
+        sendAutoRunStatus('waiting_email', { currentRun: run });
 
         // Wait for RESUME_AUTO_RUN — sets a promise that resumeAutoRun resolves
         await waitForResume();
@@ -1052,7 +1205,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
       }
 
       await addLog(`=== Run ${runTargetText} — Phase 2: Register, verify, login, complete ===`, 'info');
-      chrome.runtime.sendMessage(status('running')).catch(() => {});
+      sendAutoRunStatus('running', { currentRun: run });
 
       const signupTabId = await getTabId('signup-page');
       if (signupTabId) {
@@ -1065,7 +1218,7 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
       });
 
       await addLog(`=== Run ${runTargetText} COMPLETE! ===`, 'ok');
-      successfulRuns++;
+      await setAutoRunStats(autoRunSuccessfulRuns + 1, autoRunFailedRuns);
 
     } catch (err) {
       if (isAutoRunHandoffError(err)) {
@@ -1076,11 +1229,11 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
         await addLog(`Run ${runTargetText} stopped by user`, 'warn');
         break;
       } else {
-        failedRuns++;
+        await setAutoRunStats(autoRunSuccessfulRuns, autoRunFailedRuns + 1);
         await addLog(`Run ${runTargetText} failed: ${err.message}`, 'error');
         if (autoRunInfinite || run < totalRuns) {
           await addLog(`=== Run ${runTargetText} failed. Starting next run automatically... ===`, 'warn');
-          chrome.runtime.sendMessage(status('running')).catch(() => {});
+          sendAutoRunStatus('running', { currentRun: run });
           continue;
         }
       }
@@ -1090,8 +1243,8 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
   const lastAttemptedRun = autoRunCurrentRun;
   const summary = summarizeAutoRunResult({
     totalRuns: autoRunTotalRuns,
-    successfulRuns,
-    failedRuns,
+    successfulRuns: autoRunSuccessfulRuns,
+    failedRuns: autoRunFailedRuns,
     lastAttemptedRun,
     stopRequested,
     handedOffToManual,
@@ -1101,16 +1254,16 @@ async function autoRunLoop(totalRuns, infiniteMode = false) {
   await addLog(summary.message, summary.phase === 'complete' ? 'ok' : 'warn');
   chrome.runtime.sendMessage({
     type: 'AUTO_RUN_STATUS',
-    payload: {
+    payload: buildAutoRunStatusPayload({
       phase: summary.phase,
       currentRun: lastAttemptedRun,
       totalRuns: autoRunTotalRuns,
       infiniteMode: autoRunInfinite,
+      successfulRuns: autoRunSuccessfulRuns,
+      failedRuns: autoRunFailedRuns,
       summaryMessage: summary.message,
       summaryToast: summary.toastMessage,
-      successfulRuns,
-      failedRuns,
-    },
+    }),
   }).catch(() => {});
 
   autoRunActive = false;
