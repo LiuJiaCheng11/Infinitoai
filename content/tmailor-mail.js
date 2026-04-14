@@ -1,17 +1,18 @@
 (function() {
 if (window.__MULTIPAGE_TMAILOR_MAIL_LOADED) {
-  console.log('[Infinito.AI:tmailor-mail] Content script already loaded on', location.href);
+  console.log('[Infinitoai:tmailor-mail] Content script already loaded on', location.href);
   return;
 }
 window.__MULTIPAGE_TMAILOR_MAIL_LOADED = true;
 
-const TMAILOR_PREFIX = '[Infinito.AI:tmailor-mail]';
+const TMAILOR_PREFIX = '[Infinitoai:tmailor-mail]';
 const { findLatestMatchingItem } = LatestMail;
 const { getStepMailMatchProfile, matchesSubjectPatterns, normalizeText } = MailMatching;
 const { isMailFresh, parseMailTimestampCandidates } = MailFreshness;
 const EMAIL_REGEX = /\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i;
 const DEFAULT_CLOUDFLARE_TIMEOUT_MS = 18000;
 const MAX_CLOUDFLARE_CHECKBOX_ATTEMPTS = 8;
+const TMAILOR_SKIP_READY_COUNTDOWN = 25;
 const CLOUDFLARE_TURNSTILE_HOTSPOTS = [
   { xRatio: 0.12, yOffset: 0 },
   { xRatio: 0.16, yOffset: -6 },
@@ -172,6 +173,14 @@ async function runMailboxInterruptionSweep(options = {}) {
 
     const handledInterstitialAd = await handleDismissibleInterstitialAd(interstitialTimeoutMs);
     if (handledInterstitialAd) {
+      if (reason) {
+        log(`TMailor: Interruption sweep handled a mailbox blocker during ${reason}`, 'info');
+      }
+      return true;
+    }
+
+    const handledSkipNotice = await handleMailDetailSkipNotice(6000);
+    if (handledSkipNotice) {
       if (reason) {
         log(`TMailor: Interruption sweep handled a mailbox blocker during ${reason}`, 'info');
       }
@@ -626,6 +635,89 @@ function findInterstitialAdBox() {
   return isElementVisible(adBox) ? adBox : null;
 }
 
+function findMailDetailSkipButton() {
+  const directMatch = document.querySelector('button[name="skip"]');
+  if (isElementVisible(directMatch)) {
+    return directMatch;
+  }
+
+  const buttons = Array.from(document.querySelectorAll('button, [role="button"], a')).filter(isElementVisible);
+  return buttons.find((button) => {
+    const metaText = normalizeText([
+      button.textContent,
+      button.getAttribute?.('aria-label'),
+      button.getAttribute?.('title'),
+      button.getAttribute?.('name'),
+    ].filter(Boolean).join(' ')).toLowerCase();
+    return /\bskip\b/.test(metaText);
+  }) || null;
+}
+
+function getMailDetailSkipCountdown(button) {
+  if (!button) {
+    return null;
+  }
+
+  const countdownNode = typeof button.querySelector === 'function'
+    ? button.querySelector('.show-coundown')
+    : null;
+  const countdownText = normalizeText(countdownNode?.textContent || button.textContent || '');
+  const countdownMatch = countdownText.match(/\b(\d{1,3})\b/);
+  if (!countdownMatch) {
+    return null;
+  }
+
+  const countdown = Number.parseInt(countdownMatch[1], 10);
+  return Number.isFinite(countdown) ? countdown : null;
+}
+
+async function handleMailDetailSkipNotice(timeoutMs = 6000) {
+  const start = Date.now();
+  let clickedSkip = false;
+  let loggedNoticeDetected = false;
+  let lastWaitingCountdown = null;
+
+  while (Date.now() - start < timeoutMs) {
+    throwIfStopped();
+    const skipButton = findMailDetailSkipButton();
+    if (!skipButton) {
+      return clickedSkip;
+    }
+
+    const countdown = getMailDetailSkipCountdown(skipButton);
+    if (!loggedNoticeDetected) {
+      loggedNoticeDetected = true;
+      log(
+        `TMailor: Mail detail Skip notice detected (${describeElementForLog(skipButton, 'skip')}${Number.isFinite(countdown) ? `; countdown=${countdown}` : ''})`,
+        'info'
+      );
+    }
+
+    if (!Number.isFinite(countdown) || countdown <= TMAILOR_SKIP_READY_COUNTDOWN) {
+      log(
+        `TMailor: Mail detail Skip is ready${Number.isFinite(countdown) ? ` at countdown ${countdown}` : ''}, clicking Skip (${describeElementForLog(skipButton, 'skip')})`,
+        'info'
+      );
+      simulateClick(skipButton);
+      clickedSkip = true;
+      await sleep(900);
+      continue;
+    }
+
+    if (lastWaitingCountdown !== countdown) {
+      lastWaitingCountdown = countdown;
+      log(
+        `TMailor: Mail detail Skip countdown is ${countdown}. Waiting until it reaches ${TMAILOR_SKIP_READY_COUNTDOWN} before clicking.`,
+        'info'
+      );
+    }
+
+    await sleep(250);
+  }
+
+  return clickedSkip;
+}
+
 async function handleDismissibleInterstitialAd(timeoutMs = 4000) {
   const start = Date.now();
   let loggedWaiting = false;
@@ -852,12 +944,15 @@ async function dismissBlockingOverlay(timeoutMs = 4000) {
 
 async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_MS) {
   const start = Date.now();
+  const observeBeforeCheckboxMs = 5000;
   if (!isCloudflareChallengeVisible()) {
     return false;
   }
 
   log('TMailor: Cloudflare challenge is blocking the mailbox, attempting automatic verification first', 'warn');
-  const handled = await waitForCloudflareConfirm(timeoutMs);
+  const handled = await waitForCloudflareConfirm(timeoutMs, {
+    observeBeforeCheckboxMs,
+  });
   if (handled) {
     if (!isCloudflareChallengeVisible()) {
       log('TMailor: Cloudflare challenge cleared automatically', 'ok');
@@ -892,13 +987,14 @@ async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUD
   throw new Error('Cloudflare challenge detected on TMailor. Automatic verification did not complete, please take over manually.');
 }
 
-async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_MS) {
+async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_MS, options = {}) {
   const start = Date.now();
   const gracePeriodMs = Math.min(1500, timeoutMs);
   const delayedConfirmRetryMs = 6000;
   const textFallbackGraceMs = 1800;
   const visualSuccessFallbackMs = 5000;
   const autoVerificationWaitMs = 12000;
+  const observeBeforeCheckboxMs = Math.max(0, Number.isFinite(options?.observeBeforeCheckboxMs) ? options.observeBeforeCheckboxMs : 0);
   let sawChallenge = false;
   let challengeResolvedAt = 0;
   let lastCheckboxAttemptAt = 0;
@@ -922,6 +1018,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
   let loggedNoTokenThreshold = false;
   let loggedAutoVerifyingWait = false;
   let sawAutoVerifyingIndicator = false;
+  let loggedObserveBeforeCheckbox = false;
 
   function hasVerificationCompletionSignal(tokenLength) {
     return Number(tokenLength) > 0;
@@ -1136,6 +1233,20 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
       if (!loggedAutoVerifyingWait) {
         loggedAutoVerifyingWait = true;
         log('TMailor: Cloudflare is auto-verifying in the background. Waiting for a success signal before touching the checkbox...', 'info');
+      }
+      await sleep(250);
+      continue;
+    }
+
+    if (
+      observeBeforeCheckboxMs > 0
+      && !hasAttemptedCheckboxClick
+      && !hasVerificationCompletionSignal(responseTokenLength)
+      && Date.now() - start < observeBeforeCheckboxMs
+    ) {
+      if (!loggedObserveBeforeCheckbox) {
+        loggedObserveBeforeCheckbox = true;
+        log(`TMailor: Observation window is active for the first ${observeBeforeCheckboxMs}ms. Waiting before the first checkbox click...`, 'info');
       }
       await sleep(250);
       continue;
@@ -1632,6 +1743,10 @@ async function settleMailDetailInterruptions() {
   if (handledInterstitialAd) {
     log('TMailor: Mail detail view resumed after closing an interstitial overlay', 'info');
   }
+  const handledSkipNotice = await handleMailDetailSkipNotice(6000);
+  if (handledSkipNotice) {
+    log('TMailor: Mail detail view resumed after clicking Skip on the countdown notice', 'info');
+  }
   await ensureCloudflareChallengeClearedOrThrow(DEFAULT_CLOUDFLARE_TIMEOUT_MS);
   assertNoManualTakeoverBlockers();
 }
@@ -1843,6 +1958,7 @@ window.__MULTIPAGE_TMAILOR_TEST_HOOKS = {
   dismissBlockingOverlay,
   ensureCloudflareChallengeClearedOrThrow,
   fetchTmailorEmail,
+  handleMailDetailSkipNotice,
   handleMonetizationVideoAd,
   readCodeFromMailRow,
   readCodeFromCurrentDetailPage,

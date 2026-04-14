@@ -219,6 +219,83 @@ test('tmailor clears a blocking interstitial ad while waiting for the code on th
   assert.equal(state.lastClicked, dismissClose);
 });
 
+test('tmailor waits for the mail-detail Skip countdown to reach 25 before dismissing the notice', async () => {
+  const context = createContext();
+  const state = context.__state;
+  state.detailCodeVisible = false;
+  state.skipVisible = true;
+  state.skipCountdown = 29;
+
+  const countdownNode = {
+    get textContent() {
+      return String(state.skipCountdown);
+    },
+  };
+  const skipButton = {
+    tagName: 'BUTTON',
+    name: 'skip',
+    get textContent() {
+      return `Skip ${state.skipCountdown}`;
+    },
+    getAttribute(name) {
+      if (name === 'aria-label' || name === 'title' || name === 'name') {
+        return 'Skip';
+      }
+      return null;
+    },
+    querySelector(selector) {
+      if (selector === '.show-coundown') {
+        return countdownNode;
+      }
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 88, height: 28 };
+    },
+  };
+
+  context.document.querySelector = (selector) => {
+    if (selector === 'button[name="skip"]') {
+      return state.skipVisible ? skipButton : null;
+    }
+    if (selector === 'h1') {
+      return state.detailCodeVisible ? { textContent: 'OpenAI verification code is 112233' } : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return state.skipVisible ? [skipButton] : [];
+    }
+    return [];
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === skipButton) {
+      state.skipVisible = false;
+      state.detailCodeVisible = true;
+    }
+  };
+  context.sleep = async () => {
+    state.sleepCalls += 1;
+    if (state.skipVisible && state.skipCountdown > 25) {
+      state.skipCountdown -= 2;
+    }
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.waitForCodeInPage, 'expected tmailor test hooks to expose waitForCodeInPage');
+
+  const code = await hooks.waitForCodeInPage(1200, 50);
+
+  assert.equal(code, '112233');
+  assert.equal(state.clicked, 1);
+  assert.equal(state.lastClicked, skipButton);
+  assert.equal(state.skipCountdown, 25);
+});
+
 test('tmailor clears a monetization video ad after opening a mail row before reading the detail code', async () => {
   const context = createContext();
   const state = context.__state;
@@ -3266,8 +3343,15 @@ test('tmailor closes the ad_position_box overlay with the dismiss button selecto
 test('tmailor waitForMailboxControls auto-attempts Cloudflare before allowing manual takeover', async () => {
   const context = createContext();
   const state = context.__state;
+  let now = 0;
   let challengeVisible = true;
   let controlsVisible = false;
+
+  context.Date = class extends Date {
+    static now() {
+      return now;
+    }
+  };
 
   const turnstileContainer = {
     tagName: 'DIV',
@@ -3354,13 +3438,15 @@ test('tmailor waitForMailboxControls auto-attempts Cloudflare before allowing ma
     }
     return Promise.resolve(response);
   };
-  context.sleep = async () => {};
+  context.sleep = async (ms = 0) => {
+    now += ms;
+  };
 
   loadTmailorScript(context);
   const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
   assert.ok(hooks?.waitForMailboxControls, 'expected tmailor test hooks to expose waitForMailboxControls');
 
-  await assert.doesNotReject(() => hooks.waitForMailboxControls(500));
+  await assert.doesNotReject(() => hooks.waitForMailboxControls(7000));
   assert.equal(state.runtimeMessages?.[0]?.type, 'DEBUGGER_CLICK_AT');
   assert.ok(
     state.logs.some((entry) => /attempting automatic verification first/i.test(entry.message)),
@@ -3756,6 +3842,102 @@ test('tmailor allows extra post-confirm grace time when the Cloudflare shell cle
     context.__state.logs.some((entry) => /Cloudflare challenge cleared during the post-confirm grace window/i.test(entry.message)),
     'expected a post-confirm grace success log'
   );
+});
+
+test('tmailor production flow waits 5 seconds before the first checkbox click during Cloudflare auto handling', async () => {
+  const context = createContext();
+  const state = context.__state;
+  let now = 0;
+  let responseToken = '';
+  let firstDebuggerClickAt = null;
+  context.Date = class extends Date {
+    static now() {
+      return now;
+    }
+  };
+
+  const turnstileContainer = {
+    tagName: 'DIV',
+    className: 'cf-turnstile h-[80px] flex items-center justify-center',
+    getBoundingClientRect() {
+      return { left: 186, top: 529, width: 300, height: 80 };
+    },
+  };
+  const confirmButton = {
+    id: 'btnNewEmailForm',
+    tagName: 'BUTTON',
+    textContent: 'Confirm',
+    disabled: false,
+    getAttribute(name) {
+      if (name === 'aria-disabled') return 'false';
+      return null;
+    },
+    getBoundingClientRect() {
+      return { left: 275, top: 621, width: 122, height: 41 };
+    },
+  };
+  let challengeVisible = true;
+
+  context.document.body = {
+    get innerText() {
+      return challengeVisible ? 'Please verify that you are not a robot. Confirm' : '';
+    },
+    set innerText(value) {
+      state.bodyText = value;
+    },
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === '#btnNewEmailForm') {
+      return confirmButton;
+    }
+    if (selector === '.cf-turnstile' || selector.includes('.cf-turnstile') || selector.includes('.html-captcha')) {
+      return challengeVisible ? turnstileContainer : null;
+    }
+    if (selector.includes('input[name="cf-turnstile-response"]')) {
+      return challengeVisible || responseToken ? { value: responseToken } : null;
+    }
+    return null;
+  };
+  context.document.querySelectorAll = (selector) => {
+    if (selector === 'button, [role="button"], a, summary') {
+      return [confirmButton];
+    }
+    return [];
+  };
+  context.chrome.runtime.sendMessage = (message, callback) => {
+    state.runtimeMessages = state.runtimeMessages || [];
+    state.runtimeMessages.push(message);
+    if (message.type === 'DEBUGGER_CLICK_AT') {
+      if (firstDebuggerClickAt == null) {
+        firstDebuggerClickAt = now;
+      }
+      responseToken = 'verified-token-after-observe';
+    }
+    const response = { ok: true };
+    if (typeof callback === 'function') {
+      callback(response);
+    }
+    return Promise.resolve(response);
+  };
+  context.simulateClick = (target) => {
+    state.clicked += 1;
+    state.lastClicked = target;
+    if (target === confirmButton) {
+      challengeVisible = false;
+    }
+  };
+  context.sleep = async (ms = 0) => {
+    now += ms;
+  };
+
+  loadTmailorScript(context);
+  const hooks = context.__MULTIPAGE_TMAILOR_TEST_HOOKS;
+  assert.ok(hooks?.ensureCloudflareChallengeClearedOrThrow, 'expected tmailor to expose ensureCloudflareChallengeClearedOrThrow');
+
+  const cleared = await hooks.ensureCloudflareChallengeClearedOrThrow(12000);
+
+  assert.equal(cleared, true);
+  assert.ok(firstDebuggerClickAt >= 5000, `expected the first checkbox click after the 5s observe window, got ${firstDebuggerClickAt}`);
 });
 
 test('tmailor default Cloudflare timeout allows a token that appears after 13 seconds', async () => {
