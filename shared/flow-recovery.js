@@ -131,12 +131,43 @@
     return '';
   }
 
+  function shouldLogStep8RedirectHeartbeat({
+    elapsedMs = 0,
+    lastHeartbeatElapsedMs = 0,
+    intervalMs = 10000,
+  } = {}) {
+    const normalizedElapsedMs = Math.max(0, Number.parseInt(String(elapsedMs ?? '').trim(), 10) || 0);
+    const normalizedLastHeartbeatElapsedMs = Math.max(0, Number.parseInt(String(lastHeartbeatElapsedMs ?? '').trim(), 10) || 0);
+    const normalizedIntervalMs = Math.max(1000, Number.parseInt(String(intervalMs ?? '').trim(), 10) || 10000);
+
+    if (normalizedElapsedMs < normalizedIntervalMs) {
+      return false;
+    }
+
+    return Math.floor(normalizedElapsedMs / normalizedIntervalMs) > Math.floor(normalizedLastHeartbeatElapsedMs / normalizedIntervalMs);
+  }
+
+  function buildStep8RedirectHeartbeatMessage({
+    elapsedMs = 0,
+    currentUrl = '',
+  } = {}) {
+    const normalizedElapsedMs = Math.max(0, Number.parseInt(String(elapsedMs ?? '').trim(), 10) || 0);
+    const seconds = Math.max(1, Math.round(normalizedElapsedMs / 1000));
+    const normalizedUrl = normalizeUrl(currentUrl);
+    if (normalizedUrl) {
+      return `Step 8: Still waiting for localhost redirect after ${seconds}s. Current auth URL: ${normalizedUrl}`;
+    }
+    return `Step 8: Still waiting for localhost redirect after ${seconds}s.`;
+  }
+
   return {
+    buildStep8RedirectHeartbeatMessage,
     TMAILOR_HOME_URL,
     getMailTabOpenUrlForStep,
     getStep6RecoveryReasonForUnexpectedAuthPage,
     isLocalhostCallbackUrl,
     isRecoverableAuthRedirectText,
+    shouldLogStep8RedirectHeartbeat,
     shouldNavigateMailTabOnStepStart,
     isVpsAuthorizationNotPendingText,
   };

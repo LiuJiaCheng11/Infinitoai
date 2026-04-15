@@ -2,9 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildStep8RedirectHeartbeatMessage,
   getMailTabOpenUrlForStep,
   getStep6RecoveryReasonForUnexpectedAuthPage,
   isVpsAuthorizationNotPendingText,
+  shouldLogStep8RedirectHeartbeat,
 } = require('../shared/flow-recovery.js');
 
 test('step 7 reopens the TMailor home page before polling the login code', () => {
@@ -92,5 +94,34 @@ test('step 8 recovery ignores normal OpenAI auth-domain pages before localhost',
       expectedUrl: 'https://auth.openai.com/oauth/authorize?client_id=test',
     }),
     ''
+  );
+});
+
+test('step 8 redirect heartbeat only emits every 10 seconds while waiting', () => {
+  assert.equal(
+    shouldLogStep8RedirectHeartbeat({ elapsedMs: 9000, lastHeartbeatElapsedMs: 0 }),
+    false
+  );
+  assert.equal(
+    shouldLogStep8RedirectHeartbeat({ elapsedMs: 10000, lastHeartbeatElapsedMs: 0 }),
+    true
+  );
+  assert.equal(
+    shouldLogStep8RedirectHeartbeat({ elapsedMs: 19000, lastHeartbeatElapsedMs: 10000 }),
+    false
+  );
+  assert.equal(
+    shouldLogStep8RedirectHeartbeat({ elapsedMs: 20000, lastHeartbeatElapsedMs: 10000 }),
+    true
+  );
+});
+
+test('step 8 redirect heartbeat message includes elapsed time and current auth url', () => {
+  assert.equal(
+    buildStep8RedirectHeartbeatMessage({
+      elapsedMs: 20000,
+      currentUrl: 'https://auth.openai.com/api/auth/session?state=test',
+    }),
+    'Step 8: Still waiting for localhost redirect after 20s. Current auth URL: https://auth.openai.com/api/auth/session?state=test'
   );
 });

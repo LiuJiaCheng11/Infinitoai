@@ -67,9 +67,11 @@ const {
 } = TmailorApi;
 const { buildReclaimableTabRegistry, shouldPrepareSameUrlTabForReuse, shouldReuseActiveTabOnCreate } = TabReclaim;
 const {
+  buildStep8RedirectHeartbeatMessage,
   getMailTabOpenUrlForStep,
   getStep6RecoveryReasonForUnexpectedAuthPage,
   isLocalhostCallbackUrl,
+  shouldLogStep8RedirectHeartbeat,
   shouldNavigateMailTabOnStepStart,
 } = FlowRecovery;
 const {
@@ -3392,6 +3394,10 @@ async function ensureSignupPageReadyForVerification(state, step = 4) {
     return state;
   }
 
+  await addLog(
+    `Step ${step}: Final signup auth state before inbox polling timed out. URL=${lastPageState?.url || 'unknown'}; credential=${Boolean(lastPageState?.hasVisibleCredentialInput)}; verification=${Boolean(lastPageState?.hasVisibleVerificationInput)}; profile=${Boolean(lastPageState?.hasVisibleProfileFormInput)}; fatal=${Boolean(lastPageState?.hasFatalError)}; phone=${Boolean(lastPageState?.requiresPhoneVerification)}.`,
+    'warn'
+  );
   throw new Error(`Step ${step} blocked: signup page never advanced past the credential form, so the verification email was probably not sent.`);
 }
 
@@ -3764,10 +3770,23 @@ async function executeStep8(state) {
 
           // Fallback: poll tab URL in case webNavigation listeners missed the redirect
           let unexpectedRedirectHits = 0;
+          let lastHeartbeatElapsedMs = 0;
+          const redirectWaitStartedAt = Date.now();
           for (let i = 0; i < 30 && !resolved; i++) {
             await new Promise(r => setTimeout(r, 1000));
             try {
               const tab = await chrome.tabs.get(signupTabId);
+              const elapsedMs = Math.max(0, Date.now() - redirectWaitStartedAt);
+              if (shouldLogStep8RedirectHeartbeat({
+                elapsedMs,
+                lastHeartbeatElapsedMs,
+              })) {
+                lastHeartbeatElapsedMs = elapsedMs;
+                await addLog(buildStep8RedirectHeartbeatMessage({
+                  elapsedMs,
+                  currentUrl: tab.url || '',
+                }), 'info');
+              }
               if (isLocalhostUrl(tab.url)) {
                 captureLocalhostUrl(tab.url);
                 break;
