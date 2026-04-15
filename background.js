@@ -2781,19 +2781,19 @@ async function autoRunLoop(totalRuns, infiniteMode = false, options = {}) {
       await executeStepAndWait(2, 2000);
 
       const currentState = await getState();
-      const emailSource = getCurrentEmailSource(currentState);
-      await addLog(`=== Run ${runTargetText} — Phase 2: Refresh ${getEmailSourceLabel(emailSource)}, then return to fill the platform email field ===`, 'info');
+      const currentEmailSource = getCurrentEmailSource(currentState);
+      await addLog(`=== Run ${runTargetText} — Phase 2: Refresh ${getEmailSourceLabel(currentEmailSource)}, then return to fill the platform email field ===`, 'info');
       let emailReady = false;
       try {
         const nextEmail = await fetchEmailAddress({ generateNew: true });
-        await addLog(`=== Run ${runTargetText} — ${getEmailSourceLabel(emailSource)} ready: ${nextEmail} ===`, 'ok');
+        await addLog(`=== Run ${runTargetText} — ${getEmailSourceLabel(currentEmailSource)} ready: ${nextEmail} ===`, 'ok');
         emailReady = true;
       } catch (err) {
-        await addLog(`${getEmailSourceLabel(emailSource)} auto-fetch failed: ${err.message}`, 'warn');
+        await addLog(`${getEmailSourceLabel(currentEmailSource)} auto-fetch failed: ${err.message}`, 'warn');
       }
 
       if (!emailReady) {
-        await addLog(`=== Run ${runTargetText} PAUSED: ${getEmailWaitHint(emailSource)} ===`, 'warn');
+        await addLog(`=== Run ${runTargetText} PAUSED: ${getEmailWaitHint(currentEmailSource)} ===`, 'warn');
         sendAutoRunStatus('waiting_email', { currentRun: run });
 
         // Wait for RESUME_AUTO_RUN — sets a promise that resumeAutoRun resolves

@@ -109,3 +109,12 @@ test('infinite auto run keeps per-run reset and log-round setup inside the retry
     /const runTargetText = autoRunInfinite \? `\$\{run\}\/∞` : `\$\{run\}\/\$\{totalRuns\}`;\r?\n\r?\n\s*try \{\r?\n\s*\/\/ Reset everything at the start of each run[\s\S]*await resetState\(\{ preserveLogHistory: true \}\);[\s\S]*await startNewLogRound\(`Run \$\{runTargetText\}`\);[\s\S]*await executeStepAndWait\(2,\s*2000\);/i
   );
 });
+
+test('auto run phase 2 uses a distinct email-source binding after the per-run setup block', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /const currentState = await getState\(\);\r?\n\s*const currentEmailSource = getCurrentEmailSource\(currentState\);[\s\S]*getEmailSourceLabel\(currentEmailSource\)/i
+  );
+});
