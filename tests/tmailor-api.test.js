@@ -26,6 +26,7 @@ function createJsonResponse(body, status = 200) {
 test('fetchAllowedTmailorEmail keeps requesting new mailboxes until the domain passes current rules', async () => {
   const calls = [];
   const attemptEvents = [];
+  const sleepCalls = [];
   const fetchImpl = async (url, options = {}) => {
     calls.push({ url, options });
 
@@ -56,6 +57,10 @@ test('fetchAllowedTmailorEmail keeps requesting new mailboxes until the domain p
     onAttempt: async (event) => {
       attemptEvents.push(event);
     },
+    retryDelayMs: 800,
+    sleep: async (ms) => {
+      sleepCalls.push(ms);
+    },
   });
 
   assert.equal(result.email, 'third@fresh-allowed.com');
@@ -70,6 +75,7 @@ test('fetchAllowedTmailorEmail keeps requesting new mailboxes until the domain p
       { attempt: 3, maxAttempts: 3 },
     ]
   );
+  assert.deepEqual(sleepCalls, [800, 800]);
 });
 
 test('fetchAllowedTmailorEmail retries up to 100 times by default and suggests switching to com+whitelist mode on failure', async () => {
@@ -143,6 +149,43 @@ test('pollTmailorVerificationCode returns the fresh ChatGPT code directly from i
   assert.equal(result.code, '344928');
   assert.equal(result.mailId, 'mail-1');
   assert.equal(result.listId, 'list-1');
+});
+
+test('pollTmailorVerificationCode returns the fresh OpenAI code directly from inbox data', async () => {
+  const now = new Date('2026-04-10T10:00:00.000Z').getTime();
+  const fetchImpl = async (url, options = {}) => {
+    const payload = JSON.parse(options.body);
+    if (payload.action === 'listinbox') {
+      return createJsonResponse({
+        msg: 'ok',
+        code: 'list-openai-1',
+        data: {
+          item1: {
+            id: 'mail-openai-1',
+            email_id: 'detail-openai-1',
+            subject: '你的 OpenAI 代码为 880264',
+            from: 'noreply@tm.openai.com',
+            created_at: new Date(now).toISOString(),
+          },
+        },
+      });
+    }
+    throw new Error(`Unexpected action: ${payload.action}`);
+  };
+
+  const result = await pollTmailorVerificationCode({
+    fetchImpl,
+    accessToken: 'token-openai-1',
+    step: 4,
+    filterAfterTimestamp: now - 60_000,
+    maxAttempts: 1,
+    intervalMs: 0,
+    now,
+  });
+
+  assert.equal(result.code, '880264');
+  assert.equal(result.mailId, 'mail-openai-1');
+  assert.equal(result.listId, 'list-openai-1');
 });
 
 test('pollTmailorVerificationCode falls back to the read API when inbox preview masks the code', async () => {

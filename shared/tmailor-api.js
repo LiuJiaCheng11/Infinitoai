@@ -430,6 +430,10 @@
   async function fetchAllowedTmailorEmail(options) {
     const config = options || {};
     const maxAttempts = Number.isFinite(config.maxAttempts) ? config.maxAttempts : 100;
+    const retryDelayMs = Number.isFinite(config.retryDelayMs) ? config.retryDelayMs : 800;
+    const sleep = typeof config.sleep === 'function'
+      ? config.sleep
+      : (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
     await warmupTmailorSession({
       fetchImpl: config.fetchImpl,
@@ -471,6 +475,10 @@
           createdAt: Number(data.create) || Number(data.sort) || 0,
           generated: true,
         };
+      }
+
+      if (attempt < maxAttempts && retryDelayMs > 0) {
+        await sleep(retryDelayMs);
       }
     }
 
