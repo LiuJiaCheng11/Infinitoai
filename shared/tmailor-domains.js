@@ -7,7 +7,7 @@
 
   root.TmailorDomains = exports;
 })(typeof globalThis !== 'undefined' ? globalThis : self, function() {
-  const DEFAULT_TMAILOR_DOMAIN_MODE = 'com_only';
+  const DEFAULT_TMAILOR_DOMAIN_MODE = 'whitelist_only';
   const TMAILOR_DOMAIN_MODES = Object.freeze(['com_only', 'whitelist_only']);
 
   function normalizeDomain(value) {

@@ -71,5 +71,5 @@
       "failureCount": 1
     }
   },
-  "mode": "com_only"
+  "mode": "whitelist_only"
 }
