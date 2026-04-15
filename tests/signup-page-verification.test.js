@@ -1928,6 +1928,61 @@ test('step 6 reports the latest page oauth url when it differs from the saved pa
   );
 });
 
+test('step 8 exposes fresh debugger click coordinates when the consent page is still visible', async () => {
+  const continueButton = {
+    textContent: '继续',
+    disabled: false,
+    getAttribute(name) {
+      return name === 'aria-disabled' ? 'false' : null;
+    },
+    scrollIntoView() {},
+    focus() {},
+    getBoundingClientRect() {
+      return { left: 40, top: 80, width: 160, height: 48 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent',
+    bodyText: '使用 ChatGPT 登录到 Codex 继续',
+    waitForElementImpl(selector) {
+      if (selector.includes('button[type="submit"]')) {
+        return Promise.resolve(continueButton);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+  });
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'STEP8_FIND_AND_CLICK', source: 'background', payload: {} },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.equal(response?.buttonText, '继续');
+  assert.equal(response?.url, 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent');
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(response?.rect)),
+    {
+      left: 40,
+      top: 80,
+      width: 160,
+      height: 48,
+      centerX: 120,
+      centerY: 104,
+    }
+  );
+});
+
 test('step 5 completes and lets the flow continue when the profile form never appears after verification', async () => {
   const context = createContext({
     href: 'https://auth.openai.com/u/signup/continue',

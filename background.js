@@ -1443,6 +1443,11 @@ async function handleMessage(message, sender) {
     }
 
     case 'STEP_COMPLETE': {
+      const currentState = await getState();
+      const currentStepStatus = currentState?.stepStatuses?.[message.step];
+      if (currentStepStatus === 'completed') {
+        return { ok: true };
+      }
       if (stopRequested) {
         await setStepStatus(message.step, 'stopped');
         notifyStepError(message.step, STOP_ERROR_MESSAGE);
@@ -3022,9 +3027,43 @@ async function executeStep2(state) {
         'Step 2: Signup page navigated before the step-2 response returned. Continuing to wait for completion signal...',
         'warn'
       );
+      await waitForStep2CompletionSignalOrAuthPageReady();
       return;
     }
     throw err;
+  }
+}
+
+async function waitForStep2CompletionSignalOrAuthPageReady() {
+  const timeoutMs = 15000;
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const currentState = await getState();
+    const currentStepStatus = currentState?.stepStatuses?.[2];
+
+    if (currentStepStatus === 'completed' || currentStepStatus === 'failed' || currentStepStatus === 'stopped') {
+      return;
+    }
+
+    const pageState = await getSignupAuthPageState();
+    const authPageReady = Boolean(
+      pageState?.hasVisibleCredentialInput
+      || pageState?.hasVisibleVerificationInput
+      || pageState?.hasVisibleProfileFormInput
+    );
+
+    if (authPageReady) {
+      await addLog(
+        'Step 2: Auth page is ready after the navigation interrupt. Completing the step from the background fallback.',
+        'warn'
+      );
+      await setStepStatus(2, 'completed');
+      notifyStepComplete(2, { recoveredAfterNavigation: true });
+      return;
+    }
+
+    await sleepWithStop(250);
   }
 }
 
@@ -3647,6 +3686,47 @@ function buildStep8RecoveryErrorMessage(reason, context = {}) {
   return `Step 8 recoverable: auth flow landed on an unexpected page before localhost redirect (${reason}). Refresh the VPS OAuth link and retry with the same email and password. Current page: ${locationLabel}`;
 }
 
+async function retryStep8ConsentClickIfStillVisible(signupTabId, {
+  currentUrl = '',
+  elapsedMs = 0,
+} = {}) {
+  if (!signupTabId || !/auth\.openai\.com\/sign-in-with-chatgpt\/.+\/consent/i.test(String(currentUrl || ''))) {
+    return false;
+  }
+
+  let clickResult = null;
+  try {
+    clickResult = await sendToContentScript('signup-page', {
+      type: 'STEP8_FIND_AND_CLICK',
+      source: 'background',
+      payload: {},
+    });
+  } catch (err) {
+    const message = err?.message || '';
+    if (isMessageChannelClosedError(message) || isReceivingEndMissingError(message)) {
+      return false;
+    }
+    throw err;
+  }
+
+  if (clickResult?.error) {
+    return false;
+  }
+
+  if (!clickResult?.rect) {
+    return false;
+  }
+
+  const seconds = Math.max(1, Math.round(Math.max(0, Number(elapsedMs) || 0) / 1000));
+  await addLog(
+    `Step 8: Consent page is still visible during heartbeat after ${seconds}s; retrying the "继续" click...`,
+    'warn'
+  );
+  await clickWithDebugger(signupTabId, clickResult.rect);
+  await addLog('Step 8: Heartbeat retry click dispatched, waiting for redirect...', 'info');
+  return true;
+}
+
 async function replaySteps6Through8WithCurrentAccount(logMessage, recoveryState = {}) {
   await addLog(logMessage, 'warn');
   await setState({ localhostUrl: null });
@@ -3786,6 +3866,10 @@ async function executeStep8(state) {
                   elapsedMs,
                   currentUrl: tab.url || '',
                 }), 'info');
+                await retryStep8ConsentClickIfStillVisible(signupTabId, {
+                  currentUrl: tab.url || '',
+                  elapsedMs,
+                });
               }
               if (isLocalhostUrl(tab.url)) {
                 captureLocalhostUrl(tab.url);

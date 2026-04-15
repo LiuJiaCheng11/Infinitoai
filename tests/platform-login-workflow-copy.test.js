@@ -49,3 +49,37 @@ test('step 2 ignores navigation-driven signup page disconnects and keeps waiting
     /async function executeStep2\(state\) \{[\s\S]*try \{[\s\S]*await sendToContentScript\('signup-page', \{[\s\S]*\}\);[\s\S]*\} catch \(err\) \{[\s\S]*isMessageChannelClosedError\([\s\S]*isReceivingEndMissingError\([\s\S]*waiting for completion signal[\s\S]*throw err;[\s\S]*\}[\s\S]*\}/i
   );
 });
+
+test('step 2 has an auth-page-ready fallback when the completion signal is lost during navigation', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function waitForStep2CompletionSignalOrAuthPageReady\(\) \{/i
+  );
+  assert.match(
+    backgroundSource,
+    /Step 2: Signup page navigated before the step-2 response returned[\s\S]*await waitForStep2CompletionSignalOrAuthPageReady\(\);/i
+  );
+  assert.match(
+    backgroundSource,
+    /hasVisibleCredentialInput[\s\S]*notifyStepComplete\(2,\s*\{[\s\S]*recoveredAfterNavigation:\s*true[\s\S]*\}\)/i
+  );
+});
+
+test('step 8 heartbeats retry the consent-page continue click when the auth page stalls on consent', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function retryStep8ConsentClickIfStillVisible\(/i
+  );
+  assert.match(
+    backgroundSource,
+    /shouldLogStep8RedirectHeartbeat\([\s\S]*await retryStep8ConsentClickIfStillVisible\(/i
+  );
+  assert.match(
+    backgroundSource,
+    /Consent page is still visible during heartbeat[\s\S]*retrying the "继续" click/i
+  );
+});
