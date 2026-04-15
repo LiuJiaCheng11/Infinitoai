@@ -12,8 +12,8 @@
 
   const STEP_MAIL_MATCH_PROFILES = {
     4: {
-      include: [REGISTRATION_CN_SUBJECT],
-      exclude: [VERIFICATION_EN_SUBJECT],
+      include: [REGISTRATION_CN_SUBJECT, VERIFICATION_EN_SUBJECT],
+      exclude: [],
     },
     7: {
       include: [VERIFICATION_EN_SUBJECT],

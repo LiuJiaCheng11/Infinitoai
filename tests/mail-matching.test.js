@@ -6,11 +6,16 @@ const {
   matchesSubjectPatterns,
 } = require('../shared/mail-matching.js');
 
-test('step 4 mail profile only accepts the Chinese registration title', () => {
+test('step 4 mail profile accepts the Chinese registration title', () => {
   const profile = getStepMailMatchProfile(4);
 
   assert.equal(matchesSubjectPatterns('你的 ChatGPT 代码为 040535', profile), true);
-  assert.equal(matchesSubjectPatterns('Your ChatGPT code is 281878', profile), false);
+});
+
+test('step 4 mail profile also accepts the English verification title', () => {
+  const profile = getStepMailMatchProfile(4);
+
+  assert.equal(matchesSubjectPatterns('Your ChatGPT code is 281878', profile), true);
 });
 
 test('step 7 mail profile only accepts the English verification title', () => {
