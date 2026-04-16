@@ -50,7 +50,7 @@ async function handleCommand(message) {
   switch (message.type) {
     case 'EXECUTE_STEP':
       switch (message.step) {
-        case 2: return await step2_clickRegister();
+        case 2: return await step2_clickRegister(message.payload);
         case 3: return await step3_fillEmailPassword(message.payload);
         case 5: return await step5_fillNameBirthday(message.payload);
         case 6: return await step6_login(message.payload);
@@ -94,14 +94,15 @@ const PLATFORM_LOGIN_ENTRY_URL = 'https://platform.openai.com/login';
 const AUTH_LOGIN_HOME_URL = 'https://auth.openai.com/log-in';
 const PLATFORM_SIGNING_BRIDGE_ISSUE_TIMEOUT_MS = 45000;
 
-async function step2_clickRegister() {
+async function step2_clickRegister(payload = {}) {
+  const preferSignupEntry = Boolean(payload?.preferSignupEntry);
   log('Step 2: Looking for Register/Sign up button...');
   throwIfUnsupportedCountryRegionTerritoryBlocked(2);
 
   await waitForPlatformEntryStateToSettle();
   await logoutFromPlatformChatSessionIfNeeded();
 
-  if (isDirectSignupFormVisible()) {
+  if (isDirectSignupFormVisible({ preferSignupEntry })) {
     log('Step 2: Official signup form is already visible. Continuing without clicking Register.', 'info');
     reportComplete(2);
     return;
@@ -123,7 +124,7 @@ async function step2_clickRegister() {
     }
   }
 
-  const registerBtn = await findStep2RegisterButtonWithRecovery();
+  const registerBtn = await findStep2RegisterButtonWithRecovery({ preferSignupEntry });
   if (!registerBtn) {
     log('Step 2: Official signup form is already visible after auth-issue recovery. Continuing without clicking Register.', 'info');
     reportComplete(2);
@@ -136,7 +137,8 @@ async function step2_clickRegister() {
   log('Step 2: Clicked Register button');
 }
 
-async function findStep2RegisterButtonWithRecovery() {
+async function findStep2RegisterButtonWithRecovery(options = {}) {
+  const preferSignupEntry = Boolean(options?.preferSignupEntry);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       return await waitForElementByText(
@@ -151,7 +153,7 @@ async function findStep2RegisterButtonWithRecovery() {
       return await waitForElement('a[href*="signup"], a[href*="register"]', 5000);
     } catch {}
 
-    if (isDirectSignupFormVisible()) {
+    if (isDirectSignupFormVisible({ preferSignupEntry })) {
       return null;
     }
 
@@ -161,7 +163,7 @@ async function findStep2RegisterButtonWithRecovery() {
     }
 
     await waitForPlatformEntryStateToSettle(5000);
-    if (isDirectSignupFormVisible()) {
+    if (isDirectSignupFormVisible({ preferSignupEntry })) {
       return null;
     }
   }
@@ -584,10 +586,18 @@ function throwIfUnsupportedCountryRegionTerritoryBlocked(step, text = getVisible
   }
 }
 
-function isDirectSignupFormVisible() {
-  if (!/(platform\.openai\.com\/login|create-account|\/u\/signup\/|\/log-?in)/i.test(location.href)) {
+function isDirectSignupFormVisible(options = {}) {
+  const preferSignupEntry = Boolean(options?.preferSignupEntry);
+  const currentUrl = String(location.href || '');
+
+  if (preferSignupEntry) {
+    if (!/(create-account|\/u\/signup\/)/i.test(currentUrl)) {
+      return false;
+    }
+  } else if (!/(platform\.openai\.com\/login|create-account|\/u\/signup\/|\/log-?in)/i.test(currentUrl)) {
     return false;
   }
+
   return hasVisibleCredentialInput();
 }
 
@@ -599,6 +609,45 @@ function isCreateAccountSessionEndedPage(text = getVisiblePageText()) {
   return /你的会话已结束|session has ended|session ended|登录以继续|log in to continue|chatgpt\.com/i.test(text);
 }
 
+function isSignupContextUrl(url = location.href) {
+  return /(?:auth|accounts)\.openai\.com\/(?:u\/signup\/|create-account)/i.test(String(url || ''));
+}
+
+function isDirectPlatformLoginStep3Entry(url = location.href) {
+  // OpenAI's platform login entry is special: step 3 fills the email here first,
+  // then Continue routes the flow into the signup password screen automatically.
+  return isPlatformLoginEntryPage() && hasVisibleCredentialInput() && /platform\.openai\.com\/login/i.test(String(url || ''));
+}
+
+async function waitForStep3SignupContext(timeout = 8000) {
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    throwIfStopped();
+
+    const visibleText = getVisiblePageText();
+    if (isSignupContextUrl(location.href)) {
+      return true;
+    }
+    if (isDirectPlatformLoginStep3Entry(location.href)) {
+      return true;
+    }
+    if (isUnsupportedEmailBlockingStep(3) && isUnsupportedEmailText(visibleText, location.href)) {
+      throw new Error(getUnsupportedEmailBlockedMessage(3));
+    }
+    if (isBlockingAuthFatalError(visibleText)) {
+      throw new Error('Auth fatal error page detected before step 3 entered the signup flow.');
+    }
+    if (await handleAuthReturnHomeRecovery(3, visibleText)) {
+      throw new Error(getAuthReturnHomeRecoveryErrorMessage(3));
+    }
+
+    await sleep(250);
+  }
+
+  throw new Error(`Step 3 blocked: current auth page is not on the signup flow yet. URL: ${location.href}`);
+}
+
 // ============================================================
 // Step 3: Fill Email & Password
 // ============================================================
@@ -608,6 +657,7 @@ async function step3_fillEmailPassword(payload) {
   if (!email) throw new Error('No email provided. Paste email in Side Panel first.');
 
   throwIfAuthOperationTimedOut(3);
+  await waitForStep3SignupContext();
   log(`Step 3: Filling email: ${email}`);
 
   // Find email input
@@ -634,13 +684,19 @@ async function step3_fillEmailPassword(payload) {
 
   const inlineCredentialChoice = findStep3ImmediateCredentialChoice();
   if (inlineCredentialChoice?.passwordInput) {
+    let passwordInput = inlineCredentialChoice.passwordInput;
     if (isSignupFlowUnexpectedlyOnLoginPasswordPage()) {
-      log('Step 3: Signup flow fell back to the existing-account login password page. Preserving the current email/password and continuing with the login flow instead of requesting a signup code.', 'warn');
-      reportComplete(3, { email, existingAccountLogin: true });
-      return;
+      const recoveredSignupPasswordInput = await recoverStep3SignupPasswordInputFromLoginPasswordPage();
+      if (recoveredSignupPasswordInput) {
+        passwordInput = recoveredSignupPasswordInput;
+      } else {
+        log('Step 3: Signup flow fell back to the existing-account login password page without a visible signup entry. Preserving the current email/password and continuing with the login flow instead of requesting a signup code.', 'warn');
+        reportComplete(3, { email, existingAccountLogin: true });
+        return;
+      }
     }
     log('Step 3: Password field is already visible on the same page. Filling password before the first continue click...');
-    const submissionStartUrl = await submitStep3WithPassword(payload, inlineCredentialChoice.passwordInput);
+    const submissionStartUrl = await submitStep3WithPassword(payload, passwordInput);
     await waitForStep3CredentialSubmissionOutcome(submissionStartUrl);
     reportComplete(3, { email });
     return;
@@ -673,7 +729,7 @@ async function step3_fillEmailPassword(payload) {
     return;
   }
 
-  const passwordInput = passwordlessChoice?.passwordInput || null;
+  let passwordInput = passwordlessChoice?.passwordInput || null;
   if (!passwordInput) {
     if (await handleAuthReturnHomeRecovery(3)) {
       throw new Error(getAuthReturnHomeRecoveryErrorMessage(3));
@@ -686,9 +742,14 @@ async function step3_fillEmailPassword(payload) {
   }
 
   if (isSignupFlowUnexpectedlyOnLoginPasswordPage()) {
-    log('Step 3: Email submit landed on the existing-account login password page. Preserving the current email/password and continuing with the login flow instead of requesting a signup code.', 'warn');
-    reportComplete(3, { email, existingAccountLogin: true });
-    return;
+    const recoveredSignupPasswordInput = await recoverStep3SignupPasswordInputFromLoginPasswordPage();
+    if (recoveredSignupPasswordInput) {
+      passwordInput = recoveredSignupPasswordInput;
+    } else {
+      log('Step 3: Email submit landed on the existing-account login password page without a visible signup entry. Preserving the current email/password and continuing with the login flow instead of requesting a signup code.', 'warn');
+      reportComplete(3, { email, existingAccountLogin: true });
+      return;
+    }
   }
 
   if (!payload.password) throw new Error('No password provided. Step 3 requires a generated password.');
@@ -697,9 +758,71 @@ async function step3_fillEmailPassword(payload) {
   reportComplete(3, { email });
 }
 
+function isLoginPasswordPageUrl(url = location.href) {
+  return /(?:auth|accounts)\.openai\.com\/log-?in\/password/i.test(String(url || ''));
+}
+
 function isSignupFlowUnexpectedlyOnLoginPasswordPage() {
-  return /(?:auth|accounts)\.openai\.com\/log-?in\/password/i.test(location.href)
+  return isLoginPasswordPageUrl(location.href)
     && Boolean(findVisiblePasswordInput());
+}
+
+function findVisibleSignupRegistrationChoice() {
+  const selector = 'a, button, [role="button"], [role="link"], span';
+  const nodes = Array.from(document.querySelectorAll(selector));
+  return nodes.find((node) => {
+    if (!isElementVisible(node)) {
+      return false;
+    }
+    const text = String(node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) {
+      return false;
+    }
+    return /sign\s*up|register|create\s*account|请注册|去注册|注册/.test(text);
+  }) || null;
+}
+
+function hasVisibleSignupRegistrationChoice(text = getVisiblePageText(), url = location.href) {
+  if (!isLoginPasswordPageUrl(url)) {
+    return false;
+  }
+
+  if (findVisibleSignupRegistrationChoice()) {
+    return true;
+  }
+
+  return /还没有帐户|还没有账户|请注册|sign\s*up|register|create\s*account/.test(String(text || ''));
+}
+
+async function recoverStep3SignupPasswordInputFromLoginPasswordPage() {
+  if (!hasVisibleSignupRegistrationChoice()) {
+    return null;
+  }
+
+  const registerChoice = findVisibleSignupRegistrationChoice()
+    || await waitForElementByText(
+      'a, button, [role="button"], [role="link"], span',
+      /sign\s*up|register|create\s*account|请注册|去注册|注册/i,
+      2000
+    ).catch(() => null);
+
+  if (!registerChoice) {
+    return null;
+  }
+
+  await humanPause(450, 1200);
+  simulateClick(registerChoice);
+  log('Step 3: Login password page still offers signup, clicked Register to return to the signup password form.', 'warn');
+  await sleep(1200);
+
+  const passwordInput = findVisiblePasswordInput()
+    || await waitForElement('input[type="password"]', 5000).catch(() => null);
+
+  if (!passwordInput) {
+    throw new Error('Step 3 blocked: clicked Register from the login password page but the signup password form did not become visible. URL: ' + location.href);
+  }
+
+  return passwordInput;
 }
 
 function throwIfAuthOperationTimedOut(step, text = getVisiblePageText()) {
@@ -1044,6 +1167,8 @@ function hasVisibleContinueLikeAction() {
 }
 
 function hasVisibleOauthConsentContinueButton(text = getVisiblePageText()) {
+  const normalizedText = String(text || '');
+  const hasConsentContext = /使用\s*ChatGPT\s*登录到|log\s*in\s*to|authorize|consent|codex/i.test(normalizedText);
   const selectorMatch = getVisibleButtonLikeElements().some((button) => {
     if (!button) {
       return false;
@@ -1053,11 +1178,11 @@ function hasVisibleOauthConsentContinueButton(text = getVisiblePageText()) {
     const className = String(button.className || '');
     return actionName === 'Continue' || /\b_primary_3rdp0_107\b/.test(className);
   });
-  if (selectorMatch) {
+  if (selectorMatch && hasConsentContext) {
     return true;
   }
 
-  if (!/使用\s*ChatGPT\s*登录到|log\s*in\s*to|authorize|consent|codex/i.test(String(text || ''))) {
+  if (!hasConsentContext) {
     return false;
   }
 
@@ -1078,6 +1203,7 @@ function getAuthPageState() {
     hasFatalError: isBlockingAuthFatalError(visibleText),
     requiresPhoneVerification: isPhoneVerificationRequiredText(visibleText, location.href),
     hasUnsupportedEmail: isUnsupportedEmailText(visibleText, location.href),
+    hasVisibleSignupRegistrationChoice: hasVisibleSignupRegistrationChoice(visibleText, location.href),
     hasVisibleCredentialInput: hasVisibleCredentialInput(),
     hasVisibleVerificationInput: hasVisibleVerificationInput(),
     hasVisibleProfileFormInput: hasVisibleProfileFormInput(),
@@ -1153,7 +1279,10 @@ function hasVisibleProfileFormInput() {
   return selectors.some((selector) => Array.from(document.querySelectorAll(selector)).some(isElementVisible));
 }
 
-async function waitForProfileSubmissionOutcome(step, timeout = 7000) {
+const STEP5_PROFILE_SUBMIT_OUTCOME_TIMEOUT_MS = 12000;
+const STEP5_POST_SUBMIT_SETTLE_TIMEOUT_MS = 12000;
+
+async function waitForProfileSubmissionOutcome(step, timeout = STEP5_PROFILE_SUBMIT_OUTCOME_TIMEOUT_MS) {
   const startUrl = location.href;
   const start = Date.now();
   let nonProfileStateSince = 0;
@@ -1271,7 +1400,7 @@ async function waitForProfileSubmitButtonOrOutcome(step, timeout = 5000) {
   throw new Error(`Step ${step} blocked: profile submit button did not appear after filling the form. URL: ${location.href}`);
 }
 
-async function waitForPostProfileBlockingSettle(step, startUrl = location.href, timeout = 5000) {
+async function waitForPostProfileBlockingSettle(step, startUrl = location.href, timeout = STEP5_POST_SUBMIT_SETTLE_TIMEOUT_MS) {
   const start = Date.now();
 
   while (Date.now() - start < timeout) {

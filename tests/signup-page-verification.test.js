@@ -638,6 +638,66 @@ test('step 2 re-checks for the direct credential form before failing when no reg
   ]);
 });
 
+test('step 2 clicks register on the platform login page when recovery requires re-entering the signup path', async () => {
+  const emailInput = {
+    getBoundingClientRect() {
+      return { width: 200, height: 44 };
+    },
+  };
+  const registerButton = {
+    textContent: '注册',
+    getBoundingClientRect() {
+      return { width: 160, height: 44 };
+    },
+  };
+  let clickedTarget = null;
+
+  const context = createContext({
+    href: 'https://platform.openai.com/login',
+    bodyText: 'Build on the OpenAI API Platform Sign up',
+    waitForElementByTextImpl(_selector, pattern) {
+      if (/sign\s*up|register|create\s*account|注册/i.test(String(pattern))) {
+        return Promise.resolve(registerButton);
+      }
+      return Promise.reject(new Error('missing'));
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input#login-email') {
+        return [emailInput];
+      }
+      return [];
+    },
+  });
+  context.simulateClick = (target) => {
+    clickedTarget = target;
+    context.location.href = 'https://auth.openai.com/u/signup/identifier';
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'EXECUTE_STEP', step: 2, payload: { preferSignupEntry: true } },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 2000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.equal(clickedTarget, registerButton);
+  assert.deepEqual(context.__errors, []);
+  assert.deepEqual(context.__completions, [
+    {
+      step: 2,
+      payload: undefined,
+    },
+  ]);
+});
+
 test('step 3 submits the email first and then switches to passwordless login when the OTP button appears', async () => {
   const state = {
     stage: 'email',
@@ -666,8 +726,8 @@ test('step 3 submits the email first and then switches to passwordless login whe
   const clickedTargets = [];
 
   const context = createContext({
-    href: 'https://platform.openai.com/login',
-    bodyText: 'Build on the OpenAI API Platform',
+    href: 'https://auth.openai.com/u/signup/identifier',
+    bodyText: 'Create your account',
     waitForElementImpl(selector) {
       if (selector.includes('type="email"') || selector.includes('name="email"')) {
         return Promise.resolve(emailInput);
@@ -697,7 +757,7 @@ test('step 3 submits the email first and then switches to passwordless login whe
     clickedTargets.push(target);
     if (target === continueButton) {
       state.stage = 'password';
-      context.location.href = 'https://platform.openai.com/login/password';
+      context.location.href = 'https://auth.openai.com/u/signup/password';
       context.document.body.innerText = '输入密码 使用一次性验证码登录';
     }
   };
@@ -757,7 +817,7 @@ test('step 3 fills the password before the first continue click when the passwor
   const clickedTargets = [];
 
   const context = createContext({
-    href: 'https://platform.openai.com/login',
+    href: 'https://auth.openai.com/u/signup/password',
     bodyText: '创建密码 继续',
     waitForElementImpl(selector) {
       if (selector.includes('type="email"') || selector.includes('name="email"')) {
@@ -844,7 +904,7 @@ test('step 3 only completes after the password fallback submit actually advances
   const completionUrls = [];
 
   const context = createContext({
-    href: 'https://platform.openai.com/login',
+    href: 'https://auth.openai.com/u/signup/password',
     bodyText: '创建密码',
     waitForElementImpl(selector) {
       if (selector.includes('type="email"') || selector.includes('name="email"')) {
@@ -927,8 +987,8 @@ test('step 3 preserves the current account when email submit falls into the auth
   const clickedTargets = [];
 
   const context = createContext({
-    href: 'https://platform.openai.com/login',
-    bodyText: 'Build on the OpenAI API Platform',
+    href: 'https://auth.openai.com/u/signup/identifier',
+    bodyText: 'Create your account',
     waitForElementImpl(selector) {
       if (selector.includes('type="email"') || selector.includes('name="email"')) {
         return Promise.resolve(emailInput);
@@ -991,6 +1051,328 @@ test('step 3 preserves the current account when email submit falls into the auth
       },
     ]
   );
+});
+
+test('step 3 clicks register instead of treating the login password page as an existing-account flow when the page still offers signup', async () => {
+  const state = {
+    stage: 'email',
+  };
+
+  const emailInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+  const passwordInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+  const continueButton = {
+    textContent: '继续',
+    getBoundingClientRect() {
+      return { width: 240, height: 48 };
+    },
+  };
+  const registerButton = {
+    tagName: 'A',
+    textContent: '请注册',
+    getBoundingClientRect() {
+      return { width: 160, height: 32 };
+    },
+    closest() {
+      return null;
+    },
+  };
+  const signupContinueButton = {
+    textContent: '继续',
+    getBoundingClientRect() {
+      return { width: 240, height: 48 };
+    },
+  };
+
+  const filledValues = [];
+  const clickedTargets = [];
+
+  const context = createContext({
+    href: 'https://auth.openai.com/u/signup/identifier',
+    bodyText: 'Create your account',
+    waitForElementImpl(selector) {
+      if (selector.includes('type="email"') || selector.includes('name="email"')) {
+        return Promise.resolve(emailInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'button[type="submit"]') {
+        if (state.stage === 'email') {
+          return continueButton;
+        }
+        if (state.stage === 'signup-password') {
+          return signupContinueButton;
+        }
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[type="password"]' && (state.stage === 'login-password' || state.stage === 'signup-password')) {
+        return [passwordInput];
+      }
+      if (selector === 'a, button, [role="button"], [role="link"], span' && state.stage === 'login-password') {
+        return [registerButton];
+      }
+      return [];
+    },
+  });
+  context.fillInput = (_target, value) => {
+    filledValues.push(value);
+  };
+  context.simulateClick = (target) => {
+    clickedTargets.push(target);
+    if (target === continueButton) {
+      state.stage = 'login-password';
+      context.location.href = 'https://auth.openai.com/log-in/password';
+      context.document.body.innerText = '输入密码 还没有帐户？请注册';
+      return;
+    }
+    if (target === registerButton) {
+      state.stage = 'signup-password';
+      context.location.href = 'https://auth.openai.com/create-account/password';
+      context.document.body.innerText = '创建密码 继续';
+      return;
+    }
+    if (target === signupContinueButton) {
+      context.location.href = 'https://auth.openai.com/email-verification';
+      context.document.body.innerText = 'Enter verification code';
+    }
+  };
+
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'EXECUTE_STEP', step: 3, payload: { email: 'demo@example.com', password: 'secret-pass' } },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.deepEqual(filledValues, ['demo@example.com', 'secret-pass']);
+  assert.deepEqual(clickedTargets, [continueButton, registerButton, signupContinueButton]);
+  assert.deepEqual(context.__errors, []);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.__completions)),
+    [
+      {
+        step: 3,
+        payload: {
+          email: 'demo@example.com',
+        },
+      },
+    ]
+  );
+});
+
+test('step 3 refuses to start typing until the auth page is actually on the signup flow', async () => {
+  const emailInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+
+  const filledValues = [];
+  const context = createContext({
+    href: 'https://platform.openai.com/home',
+    bodyText: 'Build on the OpenAI API Platform',
+    waitForElementImpl(selector) {
+      if (selector.includes('type="email"') || selector.includes('name="email"')) {
+        return Promise.resolve(emailInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+  });
+  context.fillInput = (_target, value) => {
+    filledValues.push(value);
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'EXECUTE_STEP', step: 3, payload: { email: 'demo@example.com', password: 'secret-pass' } },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.match(response?.error || '', /current auth page is not on the signup flow yet/i);
+  assert.deepEqual(filledValues, []);
+  assert.deepEqual(context.__completions, []);
+});
+
+test('step 3 treats the platform login url as a direct email-first signup entry', async () => {
+  const state = {
+    onSignupPage: false,
+  };
+  const clickedTargets = [];
+  const filledValues = [];
+  const emailInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+  const continueButton = {
+    textContent: '继续',
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+  };
+  const passwordInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://platform.openai.com/login',
+    bodyText: 'Build on the OpenAI API Platform Sign up',
+    waitForElementImpl(selector) {
+      if (selector.includes('type="email"') || selector.includes('name="email"')) {
+        return Promise.resolve(emailInput);
+      }
+      if (selector === 'input[type="password"]') {
+        return Promise.resolve(passwordInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    waitForElementByTextImpl(_selector, pattern) {
+      if (/continue|next|submit|继续|下一步/i.test(String(pattern))) {
+        return Promise.resolve(continueButton);
+      }
+      return Promise.reject(new Error('missing'));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'button[type="submit"]') {
+        return continueButton;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input#login-email' && !state.onSignupPage) {
+        return [emailInput];
+      }
+      if (selector === 'input[type="email"]' && !state.onSignupPage) {
+        return [emailInput];
+      }
+      if (selector === 'input[name="email"]' && !state.onSignupPage) {
+        return [emailInput];
+      }
+      if (selector === 'input[type="password"]' && state.onSignupPage) {
+        return [passwordInput];
+      }
+      return [];
+    },
+  });
+  context.simulateClick = (target) => {
+    clickedTargets.push(target);
+    if (target === continueButton) {
+      if (!state.onSignupPage) {
+        state.onSignupPage = true;
+        context.location.href = 'https://auth.openai.com/u/signup/password';
+        context.document.body.innerText = '创建密码 继续';
+        return;
+      }
+      state.onSignupPage = false;
+      context.location.href = 'https://auth.openai.com/u/signup/email-verification';
+      context.document.body.innerText = 'Check your inbox for a verification code';
+    }
+  };
+  context.fillInput = (_target, value) => {
+    filledValues.push(value);
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'EXECUTE_STEP', step: 3, payload: { email: 'demo@example.com', password: 'secret-pass' } },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.equal(clickedTargets[0], continueButton);
+  assert.ok(filledValues.includes('demo@example.com'));
+  assert.ok(filledValues.includes('secret-pass'));
+  assert.deepEqual(context.__errors, []);
+  assert.equal(context.__completions.length, 1);
+  assert.equal(context.__completions[0]?.step, 3);
+  assert.equal(context.__completions[0]?.payload?.email, 'demo@example.com');
+});
+
+test('auth page state reports when the login password page still exposes a signup path', async () => {
+  const passwordInput = {
+    getBoundingClientRect() {
+      return { width: 220, height: 42 };
+    },
+  };
+  const registerButton = {
+    tagName: 'A',
+    textContent: '请注册',
+    innerText: '请注册',
+    getBoundingClientRect() {
+      return { width: 120, height: 32 };
+    },
+    closest() {
+      return null;
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/log-in/password',
+    bodyText: '输入密码 还没有帐户？请注册',
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[type="password"]') {
+        return [passwordInput];
+      }
+      if (selector === 'a, button, [role="button"], [role="link"], span') {
+        return [registerButton];
+      }
+      return [];
+    },
+  });
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'CHECK_AUTH_PAGE_STATE', source: 'background', payload: {} },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 2000);
+  });
+
+  assert.equal(response?.hasVisibleCredentialInput, true);
+  assert.equal(response?.hasVisibleSignupRegistrationChoice, true);
 });
 
 test('step 2 continues through the create-account session-ended landing page by clicking the visible login button', async () => {
@@ -2082,7 +2464,7 @@ test('step 3 keeps filling the credential form when stale timeout copy is visibl
   const clickedTargets = [];
 
   const context = createContext({
-    href: 'https://platform.openai.com/login',
+    href: 'https://auth.openai.com/u/signup/password',
     bodyText: '糟糕，出错了！ Operation timed out 创建密码 继续',
     waitForElementImpl(selector) {
       if (selector.includes('type="email"') || selector.includes('name="email"')) {
@@ -3828,6 +4210,110 @@ test('step 5 does not report success when the profile form disappears but the pa
   ]);
 });
 
+test('step 5 does not treat the about-you primary button styling as an oauth consent success signal before submit', async () => {
+  let fakeNow = 0;
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const ageInput = {
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const styledPrimaryButton = {
+    className: '_primary_3rdp0_107',
+    textContent: '',
+    getAttribute() {
+      return null;
+    },
+    dispatchEvent() {},
+    getBoundingClientRect() {
+      return { width: 140, height: 40 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '你的年龄是多少？ 全名 年龄 点击“完成帐户创建”，即表示你同意我们的条款并已阅读我们的隐私政策。',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'input[name="age"]') {
+        return ageInput;
+      }
+      if (selector === 'button[type="submit"]') {
+        return null;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return [nameInput];
+      }
+      if (selector === 'input[name="age"]') {
+        return [ageInput];
+      }
+      if (selector === 'input[inputmode="numeric"]') {
+        return [ageInput];
+      }
+      if (selector === 'button, [role="button"], input[type="submit"]') {
+        return [styledPrimaryButton];
+      }
+      return [];
+    },
+  });
+  context.Date = class extends Date {
+    static now() {
+      return fakeNow;
+    }
+  };
+  context.fillInput = () => {};
+  context.sleep = (ms = 0) => {
+    fakeNow += Math.max(1, Number(ms) || 0);
+    return Promise.resolve();
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'Logan',
+          lastName: 'Lee',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.match(response?.error || '', /submit button did not appear|stable next page/i);
+  assert.deepEqual(context.__completions, []);
+});
+
 test('step 5 succeeds after profile submit when the page reaches the oauth consent continue button', async () => {
   const state = {
     profileVisible: true,
@@ -4453,6 +4939,116 @@ test('step 5 succeeds when submit redirects to the platform auth callback url', 
   context.simulateClick = () => {
     state.profileVisible = false;
     context.location.href = 'https://platform.openai.com/auth/callback?code=abc&scope=openid&state=xyz';
+    context.document.body.innerText = '';
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      {
+        type: 'EXECUTE_STEP',
+        step: 5,
+        payload: {
+          firstName: 'Logan',
+          lastName: 'Lee',
+          year: 1995,
+          month: 8,
+          day: 21,
+        },
+      },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 3000);
+  });
+
+  assert.equal(response?.ok, true);
+  assert.equal(context.__completions.length, 1);
+  assert.equal(context.__completions[0].step, 5);
+});
+
+test('step 5 waits for a slower auth callback redirect before reporting success', async () => {
+  let fakeNow = 0;
+  const state = {
+    profileVisible: true,
+    clickAt: null,
+  };
+
+  const nameInput = {
+    getBoundingClientRect() {
+      return { width: 240, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const ageInput = {
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+
+  const submitButton = {
+    textContent: '完成帐户创建',
+    dispatchEvent() {},
+    getBoundingClientRect() {
+      return { width: 140, height: 40 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/about-you',
+    bodyText: '你的年龄是多少？ 全名 年龄 完成帐户创建',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="name"]')) {
+        return Promise.resolve(nameInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'input[name="age"]' && state.profileVisible) {
+        return ageInput;
+      }
+      if (selector === 'button[type="submit"]') {
+        return state.profileVisible ? submitButton : null;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="name"]') {
+        return state.profileVisible ? [nameInput] : [];
+      }
+      if (selector === 'input[name="age"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      if (selector === 'input[inputmode="numeric"]') {
+        return state.profileVisible ? [ageInput] : [];
+      }
+      return [];
+    },
+  });
+  context.Date = class extends Date {
+    static now() {
+      return fakeNow;
+    }
+  };
+  context.fillInput = () => {};
+  context.sleep = (ms = 0) => {
+    fakeNow += Math.max(1, Number(ms) || 0);
+    if (state.clickAt != null && fakeNow - state.clickAt >= 8500) {
+      context.location.href = 'https://platform.openai.com/auth/callback?code=slow&scope=openid&state=late';
+    }
+    return Promise.resolve();
+  };
+  context.simulateClick = () => {
+    state.clickAt = fakeNow;
+    state.profileVisible = false;
     context.document.body.innerText = '';
   };
   loadSignupPage(context);
