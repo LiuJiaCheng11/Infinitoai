@@ -1484,6 +1484,19 @@ async function handleMessage(message, sender) {
         notifyStepError(message.step, STOP_ERROR_MESSAGE);
         return { ok: true };
       }
+      try {
+        if (message.step === 5) {
+          await validateStep5CompletionBeforeAcceptingSuccess(message.payload);
+        }
+      } catch (err) {
+        const latestState = await getState();
+        const displayedError = decorateAuthFailureWithEmailDomain(err.message, latestState?.email);
+        await setStepStatus(message.step, 'failed');
+        await addLog(`Step ${message.step} failed: ${displayedError}`, 'error');
+        await recordTmailorOutcome('failure', { step: message.step, errorMessage: displayedError });
+        notifyStepError(message.step, displayedError);
+        return { ok: false, error: displayedError };
+      }
       await setStepStatus(message.step, 'completed');
       await addLog(`Step ${message.step} completed`, 'ok');
       await handleStepData(message.step, message.payload);
@@ -3986,6 +3999,68 @@ async function getSignupAuthPageState() {
       hasReadyVerificationPage: false,
       hasReadyProfilePage: false,
     };
+  }
+}
+
+function isCanonicalAboutYouUrl(url = '') {
+  return /(?:auth|accounts)\.openai\.com\/about-you/i.test(String(url || ''));
+}
+
+async function waitForStep5AuthStateToSettle(timeoutMs = 8000) {
+  const start = Date.now();
+  let lastPageState = null;
+
+  while (Date.now() - start < timeoutMs) {
+    const pageState = await getSignupAuthPageState();
+    lastPageState = pageState;
+
+    if (pageState?.isReachable === false) {
+      await sleepWithStop(250);
+      continue;
+    }
+
+    return pageState;
+  }
+
+  return lastPageState || {
+    isReachable: false,
+    requiresPhoneVerification: false,
+    hasUnsupportedEmail: false,
+    hasFatalError: false,
+    hasAuthOperationTimedOut: false,
+    hasVisibleCredentialInput: false,
+    hasVisibleVerificationInput: false,
+    hasVisibleProfileFormInput: false,
+    hasReadyVerificationPage: false,
+    hasReadyProfilePage: false,
+    url: '',
+  };
+}
+
+async function validateStep5CompletionBeforeAcceptingSuccess(payload = {}) {
+  if (payload?.skippedProfileForm) {
+    return;
+  }
+
+  const pageState = await waitForStep5AuthStateToSettle();
+  if (!pageState?.isReachable) {
+    throw new Error('Step 5 blocked: auth page did not become reachable again after profile submit.');
+  }
+
+  if (pageState?.hasUnsupportedEmail) {
+    throw new Error('Step 5 blocked: email domain is unsupported on the auth page.');
+  }
+
+  if (pageState?.hasFatalError) {
+    throw new Error('Auth fatal error page detected after profile submit.');
+  }
+
+  if (
+    pageState?.hasReadyProfilePage
+    || pageState?.hasVisibleProfileFormInput
+    || isCanonicalAboutYouUrl(pageState?.url)
+  ) {
+    throw new Error(`Step 5 blocked: profile submit did not reach a stable next page. URL: ${pageState?.url || 'unknown'}`);
   }
 }
 

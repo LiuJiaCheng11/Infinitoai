@@ -353,6 +353,31 @@ test('step 5 waits briefly for the page to leave verification and reach the prof
   );
 });
 
+test('step 5 completion is revalidated against the live auth page before the background accepts success', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function waitForStep5AuthStateToSettle\(timeoutMs = 8000\) \{/i
+  );
+  assert.match(
+    backgroundSource,
+    /waitForStep5AuthStateToSettle\(timeoutMs = 8000\) \{[\s\S]*if \(pageState\?\.isReachable === false\)[\s\S]*await sleepWithStop\(250\);[\s\S]*continue;/i
+  );
+  assert.match(
+    backgroundSource,
+    /async function validateStep5CompletionBeforeAcceptingSuccess\(payload = \{\}\) \{[\s\S]*const pageState = await waitForStep5AuthStateToSettle\(\);/i
+  );
+  assert.match(
+    backgroundSource,
+    /case 'STEP_COMPLETE': \{[\s\S]*if \(message\.step === 5\) \{[\s\S]*await validateStep5CompletionBeforeAcceptingSuccess\(message\.payload\);[\s\S]*\}[\s\S]*await setStepStatus\(message\.step,\s*'completed'\);/i
+  );
+  assert.match(
+    backgroundSource,
+    /validateStep5CompletionBeforeAcceptingSuccess\(payload = \{\}\) \{[\s\S]*const pageState = await waitForStep5AuthStateToSettle\(\);[\s\S]*pageState\?\.hasUnsupportedEmail[\s\S]*pageState\?\.hasReadyProfilePage[\s\S]*pageState\?\.hasVisibleProfileFormInput/i
+  );
+});
+
 test('step 4 and step 5 page-readiness checks consume the stronger auth-page semantic signals', () => {
   const backgroundSource = readProjectFile('background.js');
 
