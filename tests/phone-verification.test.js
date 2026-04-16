@@ -14,6 +14,17 @@ test('detects English phone verification prompts', () => {
   assert.equal(isPhoneVerificationRequiredText('Enter your phone number'), true);
 });
 
+test('detects add-phone auth urls as phone verification pages', () => {
+  assert.equal(
+    isPhoneVerificationRequiredText('', 'https://auth.openai.com/add-phone'),
+    true
+  );
+  assert.equal(
+    isPhoneVerificationRequiredText('', 'https://auth.openai.com/email-verification'),
+    false
+  );
+});
+
 test('does not flag unrelated OAuth consent text', () => {
   assert.equal(isPhoneVerificationRequiredText('使用 ChatGPT 登录到 Codex 继续'), false);
   assert.equal(isPhoneVerificationRequiredText('Your ChatGPT code is 281878'), false);

@@ -24,8 +24,14 @@
     return (value || '').replace(/\s+/g, ' ').trim();
   }
 
-  function isPhoneVerificationRequiredText(text) {
+  function isPhoneVerificationRequiredText(text, url = '') {
     const normalized = normalizeText(text);
+    const normalizedUrl = normalizeText(url).toLowerCase();
+
+    if (/(?:auth|accounts)\.openai\.com\/add-phone(?:[/?#]|$)/i.test(normalizedUrl)) {
+      return true;
+    }
+
     if (!normalized) {
       return false;
     }

@@ -776,7 +776,7 @@ async function fillVerificationCode(step, payload) {
     if (isAuthFatalErrorText(visibleText)) {
       throw new Error('Auth fatal error page detected before verification code input appeared.');
     }
-    if (step === 7 && isPhoneVerificationRequiredText(visibleText)) {
+    if (step === 7 && isPhoneVerificationRequiredText(visibleText, location.href)) {
       throw new Error(getPhoneVerificationBlockedMessage(step));
     }
     throw new Error('Could not find verification code input. URL: ' + location.href);
@@ -910,7 +910,7 @@ async function waitForVerificationSubmissionOutcome(step, hadRejectedStateBefore
     if (isUnsupportedEmailBlockingStep(step) && isUnsupportedEmailText(visibleText)) {
       throw new Error(getUnsupportedEmailBlockedMessage(step));
     }
-    if (step === 7 && isPhoneVerificationRequiredText(visibleText)) {
+    if (step === 7 && isPhoneVerificationRequiredText(visibleText, location.href)) {
       throw new Error(getPhoneVerificationBlockedMessage(step));
     }
     if (isVerificationCodeRejectedText(visibleText) && !hadRejectedStateBeforeSubmit) {
@@ -1037,7 +1037,7 @@ function getAuthPageState() {
   return {
     hasAuthOperationTimedOut: isAuthOperationTimedOutText(visibleText),
     hasFatalError: isAuthFatalErrorText(visibleText),
-    requiresPhoneVerification: isPhoneVerificationRequiredText(visibleText),
+    requiresPhoneVerification: isPhoneVerificationRequiredText(visibleText, location.href),
     hasUnsupportedEmail: isUnsupportedEmailText(visibleText),
     hasVisibleCredentialInput: hasVisibleCredentialInput(),
     hasVisibleVerificationInput: hasVisibleVerificationInput(),
@@ -1320,7 +1320,7 @@ async function waitForStep3CredentialSubmissionOutcome(startUrl, timeout = 8000)
     if (isAuthFatalErrorText(visibleText)) {
       throw new Error('Auth fatal error page detected after step 3 password submit.');
     }
-    if (isPhoneVerificationRequiredText(visibleText)) {
+    if (isPhoneVerificationRequiredText(visibleText, location.href)) {
       throw new Error(getPhoneVerificationBlockedMessage(3));
     }
     if (isUnsupportedEmailBlockingStep(3) && isUnsupportedEmailText(visibleText)) {

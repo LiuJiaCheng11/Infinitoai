@@ -243,6 +243,83 @@ test('step 7 reports the phone-verification blocker without auth-domain decorati
   ]);
 });
 
+test('step 7 reports the phone-verification blocker when the verification submit lands on add-phone', async () => {
+  const codeInput = {
+    inputMode: 'numeric',
+    getBoundingClientRect() {
+      return { width: 120, height: 40 };
+    },
+    dispatchEvent() {},
+    focus() {},
+  };
+  const submitButton = {
+    textContent: '继续',
+    disabled: false,
+    getAttribute() {
+      return null;
+    },
+    getBoundingClientRect() {
+      return { width: 160, height: 44 };
+    },
+  };
+
+  const context = createContext({
+    href: 'https://auth.openai.com/email-verification',
+    bodyText: 'Check your inbox and enter the 6-digit code',
+    waitForElementImpl(selector) {
+      if (selector.includes('input[name="code"]')) {
+        return Promise.resolve(codeInput);
+      }
+      return Promise.reject(new Error(`missing: ${selector}`));
+    },
+    querySelectorImpl(selector) {
+      if (selector === 'button[type="submit"]') {
+        return submitButton;
+      }
+      return null;
+    },
+    querySelectorAllImpl(selector) {
+      if (selector === 'input[name="code"]' || selector === 'input[inputmode="numeric"]') {
+        return [codeInput];
+      }
+      return [];
+    },
+  });
+  context.PhoneVerification = require('../shared/phone-verification.js');
+  context.fillInput = () => {};
+  context.simulateClick = (target) => {
+    if (target === submitButton) {
+      context.location.href = 'https://auth.openai.com/add-phone';
+      context.document.body.innerText = 'Continue';
+    }
+  };
+  loadSignupPage(context);
+
+  const listener = context.__listeners[0];
+  assert.ok(listener, 'expected signup-page to register a runtime listener');
+
+  const response = await new Promise((resolve, reject) => {
+    const keepAlive = listener(
+      { type: 'FILL_CODE', step: 7, payload: { code: '123456' } },
+      {},
+      (result) => resolve(result)
+    );
+    assert.equal(keepAlive, true);
+    setTimeout(() => reject(new Error('timeout waiting for response')), 2000);
+  });
+
+  assert.equal(
+    response?.error,
+    'Step 7 blocked: phone number is required on the auth page. Please change node and retry.'
+  );
+  assert.deepEqual(context.__errors, [
+    {
+      step: 7,
+      message: response.error,
+    },
+  ]);
+});
+
 test('step 2 stops immediately and asks to change node when oauth page shows unsupported country or region', async () => {
   const context = createContext({
     href: 'https://auth.openai.com/api/oauth/authorize?client_id=test-client',
