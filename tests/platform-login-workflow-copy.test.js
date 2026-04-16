@@ -136,6 +136,28 @@ test('step 4 replays step 2 and step 3 once with the current TMailor mailbox bef
   );
 });
 
+test('step 4 first retries the current verification page with the same code before falling back to a reload', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function submitVerificationCodeWithRecovery\(step,\s*code,\s*options\s*=\s*\{\}\) \{[\s\S]*tryDirectVerificationCodeFillOnCurrentSignupPage[\s\S]*recoverSignupPageFillCodeError[\s\S]*reloadIfSameUrl:\s*true/i
+  );
+});
+
+test('signup auth page state distinguishes an unreachable tab from a real non-ready page', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /return pageState \|\| \{[\s\S]*isReachable:\s*true[\s\S]*\};/i
+  );
+  assert.match(
+    backgroundSource,
+    /catch \{[\s\S]*isReachable:\s*false[\s\S]*\}/i
+  );
+});
+
 test('step 3 keeps waiting for completion when the signup auth page enters bfcache during navigation', () => {
   const backgroundSource = readProjectFile('background.js');
 

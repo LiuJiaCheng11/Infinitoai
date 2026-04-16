@@ -3657,6 +3657,246 @@ async function pollVerificationCodeFromMail(step, mail, payload) {
 }
 
 async function submitVerificationCode(step, code) {
+  return await submitVerificationCodeWithRecovery(step, code, { recovered: false });
+}
+
+function shouldRecoverSignupPageFillCodeError(error) {
+  const message = typeof error === 'string' ? error : error?.message || '';
+  return /content script on signup-page did not respond/i.test(message)
+    || /message port closed|receiving end does not exist|tab was closed/i.test(message);
+}
+
+async function tryDirectVerificationCodeFillOnCurrentSignupPage(step, code) {
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    return { attempted: false, reason: 'missing-signup-tab' };
+  }
+
+  const signupTab = await chrome.tabs.get(signupTabId).catch(() => null);
+  const currentUrl = String(signupTab?.url || '').trim();
+  if (!/(?:auth|accounts)\.openai\.com\/(?:account\/)?email-verification/i.test(currentUrl)) {
+    return {
+      attempted: false,
+      reason: 'not-verification-page',
+      url: currentUrl,
+    };
+  }
+
+  await addLog(
+    `Step ${step}: Signup page command stalled on the current verification page. Trying to fill the current verification form with the same code before reloading...`,
+    'warn'
+  );
+
+  const executionResults = await chrome.scripting.executeScript({
+    target: { tabId: signupTabId },
+    func: async (verificationCode) => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const code = String(verificationCode || '').trim();
+      const codeSelectors = [
+        'input[name="code"]',
+        'input[name="otp"]',
+        'input[type="text"][maxlength="6"]',
+        'input[aria-label*="code" i]',
+        'input[placeholder*="code" i]',
+        'input[inputmode="numeric"]',
+      ];
+      const submitButtonText = /verify|confirm|submit|continue|确认|验证|继续/i;
+      const rejectionText = /incorrect code|invalid code|wrong code|code is invalid|验证码错误|验证码无效/i;
+
+      const isVisible = (element) => {
+        if (!element) return false;
+        const rect = element.getBoundingClientRect?.();
+        const style = window.getComputedStyle?.(element);
+        return Boolean(
+          rect
+          && rect.width > 0
+          && rect.height > 0
+          && style
+          && style.visibility !== 'hidden'
+          && style.display !== 'none'
+        );
+      };
+
+      const dispatchInputValue = (input, value) => {
+        if (!input) return;
+        const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value');
+        if (descriptor?.set) {
+          descriptor.set.call(input, value);
+        } else {
+          input.value = value;
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+
+      const getVisibleVerificationInput = () => {
+        for (const selector of codeSelectors) {
+          const input = document.querySelector(selector);
+          if (isVisible(input)) {
+            return input;
+          }
+        }
+        return null;
+      };
+
+      const getVisibleSingleDigitInputs = () =>
+        Array.from(document.querySelectorAll('input[maxlength="1"]')).filter(isVisible);
+
+      const hasVerificationInput = () =>
+        Boolean(getVisibleVerificationInput()) || getVisibleSingleDigitInputs().length >= 6;
+
+      const hasProfileInput = () =>
+        Array.from(document.querySelectorAll(
+          'input[name="name"], input[autocomplete="name"], input[placeholder*="全名"], input[name="age"], input[name="birthday"]'
+        )).some(isVisible);
+
+      const findSubmitButton = () => {
+        const explicitSubmit = document.querySelector('button[type="submit"]');
+        if (isVisible(explicitSubmit)) {
+          return explicitSubmit;
+        }
+
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+        return buttons.find((button) => isVisible(button) && submitButtonText.test(String(button.textContent || '').trim())) || null;
+      };
+
+      const submitByFallback = (input) => {
+        const form = input?.form || input?.closest?.('form') || null;
+        if (form?.requestSubmit) {
+          form.requestSubmit();
+          return true;
+        }
+        if (form?.submit) {
+          form.submit();
+          return true;
+        }
+        if (!input?.dispatchEvent) {
+          return false;
+        }
+        input.focus?.();
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+        input.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+        return true;
+      };
+
+      const startUrl = location.href;
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (hasVerificationInput()) {
+          break;
+        }
+        if (location.href !== startUrl || hasProfileInput()) {
+          return { accepted: true, reason: 'page-already-advanced', url: location.href };
+        }
+        await sleep(250);
+      }
+
+      const singleInputs = getVisibleSingleDigitInputs();
+      const primaryInput = getVisibleVerificationInput() || singleInputs[0] || null;
+      if (!primaryInput && singleInputs.length < 6) {
+        return { attempted: false, reason: 'missing-verification-input', url: location.href };
+      }
+
+      if (singleInputs.length >= 6) {
+        for (let index = 0; index < 6 && index < singleInputs.length; index += 1) {
+          dispatchInputValue(singleInputs[index], code[index] || '');
+          await sleep(60);
+        }
+      } else if (primaryInput) {
+        dispatchInputValue(primaryInput, code);
+      }
+
+      await sleep(250);
+
+      const submitButton = findSubmitButton();
+      if (submitButton) {
+        for (let attempt = 0; attempt < 34; attempt += 1) {
+          const ariaDisabled = submitButton.getAttribute?.('aria-disabled') === 'true';
+          if (!submitButton.disabled && !ariaDisabled) {
+            submitButton.click();
+            break;
+          }
+          if (!hasVerificationInput()) {
+            return { accepted: true, reason: 'page-advanced-before-click', url: location.href };
+          }
+          await sleep(150);
+        }
+      } else if (!submitByFallback(primaryInput)) {
+        return { attempted: true, accepted: false, reason: 'missing-submit-action', url: location.href };
+      }
+
+      for (let attempt = 0; attempt < 24; attempt += 1) {
+        const visibleText = String(document.body?.innerText || '');
+        if (rejectionText.test(visibleText)) {
+          return { attempted: true, retryInbox: true, reason: 'verification-code-rejected', url: location.href };
+        }
+        if (location.href !== startUrl || hasProfileInput()) {
+          return { accepted: true, reason: 'page-advanced', url: location.href };
+        }
+        if (!hasVerificationInput()) {
+          return { accepted: true, reason: 'verification-form-hidden', url: location.href };
+        }
+        await sleep(250);
+      }
+
+      return {
+        attempted: true,
+        accepted: false,
+        reason: 'verification-form-still-visible',
+        url: location.href,
+      };
+    },
+    args: [code],
+  }).catch(() => []);
+
+  const result = executionResults?.[0]?.result || null;
+  if (result?.accepted) {
+    await addLog(
+      `Step ${step}: Reused the current verification page with the same code successfully (${result.reason || 'page-advanced'}).`,
+      'info'
+    );
+    return result;
+  }
+
+  if (result?.retryInbox) {
+    await addLog(`Step ${step}: Current verification page rejected the code. Returning to inbox polling...`, 'warn');
+    return result;
+  }
+
+  if (result?.attempted) {
+    await addLog(
+      `Step ${step}: The current verification page kept the form visible after a direct same-page retry (${result.reason || 'unknown'}). Falling back to a one-time reload of the same URL...`,
+      'warn'
+    );
+  }
+
+  return result || { attempted: false, reason: 'direct-same-page-retry-unavailable', url: currentUrl };
+}
+
+async function recoverSignupPageFillCodeError(step, error) {
+  const signupTabId = await getTabId('signup-page');
+  if (!signupTabId) {
+    throw error;
+  }
+
+  const signupTab = await chrome.tabs.get(signupTabId).catch(() => null);
+  if (!signupTab?.url) {
+    throw error;
+  }
+
+  await addLog(
+    `Step ${step}: ${error?.message || String(error || 'unknown error')} Reloading the current signup verification page and retrying the code submit once...`,
+    'warn'
+  );
+  await reuseOrCreateTab('signup-page', signupTab.url, {
+    reloadIfSameUrl: true,
+  });
+  await sleepWithStop(800);
+}
+
+async function submitVerificationCodeWithRecovery(step, code, options = {}) {
+  const { recovered = false } = options;
   const signupTabId = await getTabId('signup-page');
   if (!signupTabId) {
     throw new Error('Signup/auth page tab was closed. Cannot fill verification code.');
@@ -3678,6 +3918,14 @@ async function submitVerificationCode(step, code) {
       await addLog(`Step ${step}: Signup page navigated before submit response; waiting for completion signal...`, 'info');
       return { accepted: true, reason: 'navigation-detached' };
     }
+    if (!recovered && shouldRecoverSignupPageFillCodeError(err)) {
+      const directRetryResult = await tryDirectVerificationCodeFillOnCurrentSignupPage(step, code);
+      if (directRetryResult?.accepted || directRetryResult?.retryInbox) {
+        return directRetryResult;
+      }
+      await recoverSignupPageFillCodeError(step, err);
+      return await submitVerificationCodeWithRecovery(step, code, { recovered: true });
+    }
     throw err;
   }
 
@@ -3696,6 +3944,7 @@ async function getSignupAuthPageState() {
       payload: {},
     });
     return pageState || {
+      isReachable: true,
       requiresPhoneVerification: false,
       hasFatalError: false,
       hasAuthOperationTimedOut: false,
@@ -3707,6 +3956,7 @@ async function getSignupAuthPageState() {
     };
   } catch {
     return {
+      isReachable: false,
       requiresPhoneVerification: false,
       hasFatalError: false,
       hasAuthOperationTimedOut: false,
@@ -3724,11 +3974,24 @@ async function ensureSignupPageReadyForVerification(state, step = 4) {
   const timeoutMs = 10000;
   let refreshedOauthAfterTimeout = false;
   let hasLoggedAmbiguousPageWait = false;
+  let hasLoggedUnreachableWait = false;
   let lastPageState = null;
 
   while (Date.now() - start < timeoutMs) {
     const pageState = await getSignupAuthPageState();
     lastPageState = pageState;
+
+    if (pageState?.isReachable === false) {
+      if (!hasLoggedUnreachableWait) {
+        hasLoggedUnreachableWait = true;
+        await addLog(
+          `Step ${step}: Signup auth page is temporarily unreachable. Waiting for the verification page to become responsive before polling the inbox...`,
+          'warn'
+        );
+      }
+      await sleepWithStop(1000);
+      continue;
+    }
 
     if (pageState?.hasAuthOperationTimedOut) {
       if (refreshedOauthAfterTimeout) {
