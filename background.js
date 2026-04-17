@@ -4363,7 +4363,7 @@ async function waitForStep4VerificationAdvanceSignal(step, options = {}) {
       return null;
     }
 
-    const pageState = await getSignupAuthPageState().catch(() => null);
+    const pageState = await getSignupAuthPageStateForRecoveryMonitor();
     if (isStep4VerificationAdvanceState(pageState)) {
       if (shouldStop()) {
         return null;
@@ -4395,7 +4395,7 @@ async function waitForStep4SlowCodeFillRecovery(step, code, options = {}) {
     return null;
   }
 
-  const pageState = await getSignupAuthPageState().catch(() => null);
+  const pageState = await getSignupAuthPageStateForRecoveryMonitor();
   if (shouldStop()) {
     return null;
   }
@@ -4487,6 +4487,15 @@ async function getSignupPageFallbackAuthState() {
     hasReadyProfilePage: false,
     url: signupUrl,
   };
+}
+
+async function getSignupAuthPageStateForRecoveryMonitor() {
+  const fallbackState = await getSignupPageFallbackAuthState().catch(() => null);
+  if (fallbackState) {
+    return fallbackState;
+  }
+
+  return await getSignupAuthPageState().catch(() => null);
 }
 
 function isCanonicalAboutYouUrl(url = '') {
@@ -4797,6 +4806,24 @@ async function executeVerificationMailStep(step, state, options) {
 
     if (step === 4) {
       await setState({ lastSignupVerificationCode: result.code });
+    }
+
+    if (submitResult?.accepted) {
+      const currentState = await getState();
+      if (currentState?.stepStatuses?.[step] !== 'completed') {
+        const backgroundCompletionPayload = {
+          backgroundVerifiedCompletion: true,
+          reason: submitResult.reason || '',
+          url: submitResult.url || '',
+        };
+        if (result.emailTimestamp) {
+          backgroundCompletionPayload.emailTimestamp = result.emailTimestamp;
+        }
+        await setStepStatus(step, 'completed');
+        await addLog(`第 ${step} 步已完成`, 'ok');
+        await handleStepData(step, backgroundCompletionPayload);
+        notifyStepComplete(step, backgroundCompletionPayload);
+      }
     }
 
     return;

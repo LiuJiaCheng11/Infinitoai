@@ -460,6 +460,32 @@ test('step 4 starts a direct same-page fill recovery when the verification code 
   );
 });
 
+test('step 4 recovery monitoring prefers canonical auth-url fallback signals before waiting on the slower signup-page probe', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function getSignupAuthPageStateForRecoveryMonitor\(\) \{[\s\S]*const fallbackState = await getSignupPageFallbackAuthState\(\)\.catch\(\(\) => null\);[\s\S]*if \(fallbackState\) \{[\s\S]*return fallbackState;[\s\S]*\}[\s\S]*return await getSignupAuthPageState\(\)\.catch\(\(\) => null\);/i
+  );
+  assert.match(
+    backgroundSource,
+    /async function waitForStep4VerificationAdvanceSignal\(step,\s*options = \{\}\) \{[\s\S]*getSignupAuthPageStateForRecoveryMonitor\(\)/i
+  );
+  assert.match(
+    backgroundSource,
+    /async function waitForStep4SlowCodeFillRecovery\(step,\s*code,\s*options = \{\}\) \{[\s\S]*getSignupAuthPageStateForRecoveryMonitor\(\)/i
+  );
+});
+
+test('verification mail steps complete themselves from background recovery when the content-script completion signal is missing', () => {
+  const backgroundSource = readProjectFile('background.js');
+
+  assert.match(
+    backgroundSource,
+    /async function executeVerificationMailStep\(step,\s*state,\s*options\) \{[\s\S]*const submitResult = await submitVerificationCode\(step,\s*result\.code\);[\s\S]*if \(submitResult\?\.accepted\) \{[\s\S]*const currentState = await getState\(\);[\s\S]*currentState\?\.stepStatuses\?\.\[step\]\s*!==\s*'completed'[\s\S]*backgroundVerifiedCompletion:\s*true[\s\S]*await setStepStatus\(step,\s*'completed'\);[\s\S]*await addLog\(`第 \$\{step\} 步已完成`, 'ok'\);[\s\S]*await handleStepData\(step,\s*backgroundCompletionPayload\);[\s\S]*notifyStepComplete\(step,\s*backgroundCompletionPayload\)/i
+  );
+});
+
 test('step 3 retries once with the current email and password when the signup credential page stalls', () => {
   const runtimeErrorsSource = readProjectFile(path.join('shared', 'runtime-errors.js'));
 
