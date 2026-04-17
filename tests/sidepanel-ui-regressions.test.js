@@ -7,6 +7,10 @@ function readSidepanelSource() {
   return fs.readFileSync(path.join(__dirname, '..', 'sidepanel', 'sidepanel.js'), 'utf8');
 }
 
+function readSidepanelCss() {
+  return fs.readFileSync(path.join(__dirname, '..', 'sidepanel', 'sidepanel.css'), 'utf8');
+}
+
 test('auto-run reset clears both email and password fields in the side panel UI', () => {
   const source = readSidepanelSource();
 
@@ -120,9 +124,33 @@ test('side panel toast markup uses an icon close button with an accessible label
   assert.match(source, /class="toast-close"[^>]*aria-label="关闭提示"[^>]*>\$\{TOAST_CLOSE_ICON\}<\/button>/);
 });
 
+test('side panel toast layout vertically centers the leading icon with its message', () => {
+  const css = readSidepanelCss();
+  const toastRule = css.match(/\.toast\s*\{[^}]+\}/);
+
+  assert.ok(toastRule, 'expected to find the .toast rule');
+  assert.match(toastRule[0], /align-items:\s*center;/);
+});
+
 test('side panel toast dismissal has a fallback path when the exit animation event does not fire', () => {
   const source = readSidepanelSource();
 
   assert.match(source, /setTimeout\(\(\)\s*=>\s*finalizeToastDismiss\(toast\),\s*260\)/);
   assert.match(source, /toast\.addEventListener\('animationend',\s*\(\)\s*=>\s*\{[\s\S]*finalizeToastDismiss\(toast\);/);
+});
+
+test('side panel renders a target mailbox timer row directly below the error stats panel and refreshes it from state', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'sidepanel', 'sidepanel.html'), 'utf8');
+  const source = readSidepanelSource();
+
+  assert.match(html, /id="run-target-email-timer"/);
+  assert.match(
+    html,
+    /run-stats-panel-failure[\s\S]*id="run-failure-details"[\s\S]*id="run-target-email-timer"/,
+  );
+  assert.match(source, /const runTargetEmailTimer = document\.getElementById\('run-target-email-timer'\);/);
+  assert.match(source, /lastTargetEmailAcquiredAtState/);
+  assert.match(source, /updateTargetEmailTimerDisplay\(state\.lastTargetEmailAcquiredAt\);/);
+  assert.match(source, /message\.payload\.lastTargetEmailAcquiredAt !== undefined/);
+  assert.match(source, /setInterval\(\(\)\s*=>\s*\{[\s\S]*updateTargetEmailTimerDisplay\(\);[\s\S]*\},\s*1000\)/);
 });

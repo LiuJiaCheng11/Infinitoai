@@ -439,6 +439,20 @@ header {
   color: var(--red);
 }
 
+.run-stat-text.failure-meta {
+  color: var(--text-secondary);
+}
+
+.run-target-email-timer {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg-base) 90%, var(--red-soft) 10%);
+}
+
 .run-failure-details {
   display: flex;
   flex-direction: column;
@@ -1382,7 +1396,7 @@ header {
 
 .toast {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   padding: 10px 14px;
   border-radius: var(--radius-md);

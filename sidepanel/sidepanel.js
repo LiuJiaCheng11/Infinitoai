@@ -38,6 +38,7 @@ const runSuccessStats = document.getElementById('run-success-stats');
 const runFailureStats = document.getElementById('run-failure-stats');
 const runSuccessDetails = document.getElementById('run-success-details');
 const runFailureDetails = document.getElementById('run-failure-details');
+const runTargetEmailTimer = document.getElementById('run-target-email-timer');
 const rowMailProvider = document.getElementById('row-mail-provider');
 const selectMailProvider = document.getElementById('select-mail-provider');
 const selectEmailSource = document.getElementById('select-email-source');
@@ -86,6 +87,7 @@ const { shouldDisableStepButton, shouldEnableStopButton } = ManualStepControls;
 const { buildLogRoundClipboardText } = SidepanelLogCopy;
 const { isLogNearBottom, shouldShowScrollToBottomButton } = SidepanelLogScroll;
 const {
+  buildTargetMailboxTimerHtml,
   buildRunFailureSummaryHtml,
   buildRunStatsDetailsHtml,
   buildRunSuccessDetailsHtml,
@@ -126,6 +128,7 @@ let keepLogPinnedToBottom = true;
 let logRoundsState = [];
 let selectedLogRoundId = '';
 let followLatestLogRound = true;
+let lastTargetEmailAcquiredAtState = null;
 renderTmailorModeOptions();
 
 const ACTION_ICONS = {
@@ -461,6 +464,7 @@ async function restoreState() {
     }
 
     updateAutoRunStatsDisplay(state.autoRunStats);
+    updateTargetEmailTimerDisplay(state.lastTargetEmailAcquiredAt);
     updateStatusDisplay(state);
     updateProgressCounter();
     updateMailProviderUI();
@@ -492,6 +496,20 @@ function updateAutoRunStatsDisplay(stats = {}) {
   if (runFailureDetails) {
     runFailureDetails.innerHTML = buildRunStatsDetailsHtml(normalizedStats);
   }
+}
+
+function updateTargetEmailTimerDisplay(lastTargetEmailAcquiredAt = lastTargetEmailAcquiredAtState) {
+  lastTargetEmailAcquiredAtState = Number.isFinite(lastTargetEmailAcquiredAt) && lastTargetEmailAcquiredAt > 0
+    ? lastTargetEmailAcquiredAt
+    : null;
+
+  if (!runTargetEmailTimer) {
+    return;
+  }
+
+  runTargetEmailTimer.innerHTML = buildTargetMailboxTimerHtml(lastTargetEmailAcquiredAtState, {
+    now: Date.now(),
+  });
 }
 
 function updateMailProviderUI() {
@@ -1681,6 +1699,9 @@ chrome.runtime.onMessage.addListener((message) => {
       if (message.payload.autoRunStats) {
         updateAutoRunStatsDisplay(message.payload.autoRunStats);
       }
+      if (message.payload.lastTargetEmailAcquiredAt !== undefined) {
+        updateTargetEmailTimerDisplay(message.payload.lastTargetEmailAcquiredAt);
+      }
       if (message.payload.oauthUrl) {
         setDisplayValue(displayOauthUrl, message.payload.oauthUrl);
       }
@@ -1778,6 +1799,9 @@ btnTheme.addEventListener('click', () => {
 initTheme();
 renderStaticActionButtons();
 renderTmailorApiStatus();
+setInterval(() => {
+  updateTargetEmailTimerDisplay();
+}, 1000);
 restoreState().then(() => {
   syncPasswordToggleLabel();
   updateButtonStates();
