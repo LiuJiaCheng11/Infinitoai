@@ -174,6 +174,18 @@ test('side panel exposes console and accounts tabs with account export and clear
   assert.match(source, /function downloadAccountRecordsCsv\(\)/);
 });
 
+test('side panel adds an opt-in success-only filter for account records', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'sidepanel', 'sidepanel.html'), 'utf8');
+  const source = readSidepanelSource();
+
+  assert.match(html, /id="input-accounts-success-only"/);
+  assert.match(html, /保留成功项/);
+  assert.match(source, /const inputAccountsSuccessOnly = document\.getElementById\('input-accounts-success-only'\);/);
+  assert.match(source, /let showSuccessOnlyAccountRecords = false;/);
+  assert.match(source, /const visibleRecords = showSuccessOnlyAccountRecords \? accountRecordsState\.filter\(\(record\) => record\.status === 'success'\) : accountRecordsState;/);
+  assert.match(source, /inputAccountsSuccessOnly\.addEventListener\('change', \(\) => \{[\s\S]*showSuccessOnlyAccountRecords = Boolean\(inputAccountsSuccessOnly\.checked\);[\s\S]*renderAccountRecords\(accountRecordsState\);/);
+});
+
 test('side panel removes the accounts subtitle and confirms before clearing persisted account records', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'sidepanel', 'sidepanel.html'), 'utf8');
   const source = readSidepanelSource();

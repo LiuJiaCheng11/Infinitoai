@@ -1593,11 +1593,17 @@ header {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .accounts-actions .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.accounts-filter-toggle {
+  white-space: nowrap;
 }
 
 .accounts-table-wrap {

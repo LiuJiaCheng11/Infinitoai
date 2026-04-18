@@ -36,6 +36,7 @@ const btnViewConsole = document.getElementById('btn-view-console');
 const btnViewAccounts = document.getElementById('btn-view-accounts');
 const consoleView = document.getElementById('console-view');
 const accountsView = document.getElementById('accounts-view');
+const inputAccountsSuccessOnly = document.getElementById('input-accounts-success-only');
 const btnClearAccountRecords = document.getElementById('btn-clear-account-records');
 const btnExportAccountsCsv = document.getElementById('btn-export-accounts-csv');
 const tbodyAccountRecords = document.getElementById('tbody-account-records');
@@ -141,6 +142,7 @@ let selectedLogRoundId = '';
 let followLatestLogRound = true;
 let lastTargetEmailAcquiredAtState = null;
 let accountRecordsState = [];
+let showSuccessOnlyAccountRecords = false;
 let activePanelView = 'console';
 renderTmailorModeOptions();
 
@@ -570,7 +572,19 @@ function renderAccountRecords(records = []) {
     return;
   }
 
-  const rows = accountRecordsState
+  const visibleRecords = showSuccessOnlyAccountRecords ? accountRecordsState.filter((record) => record.status === 'success') : accountRecordsState;
+  if (visibleRecords.length === 0) {
+    tbodyAccountRecords.innerHTML = '<tr><td class="empty" colspan="7">暂无符合条件的账号记录</td></tr>';
+    if (btnClearAccountRecords) {
+      btnClearAccountRecords.disabled = false;
+    }
+    if (btnExportAccountsCsv) {
+      btnExportAccountsCsv.disabled = false;
+    }
+    return;
+  }
+
+  const rows = visibleRecords
     .slice()
     .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
     .map((record) => {
@@ -1773,6 +1787,13 @@ btnViewConsole.addEventListener('click', () => {
 btnViewAccounts.addEventListener('click', () => {
   setActivePanelView('accounts');
 });
+
+if (inputAccountsSuccessOnly) {
+  inputAccountsSuccessOnly.addEventListener('change', () => {
+    showSuccessOnlyAccountRecords = Boolean(inputAccountsSuccessOnly.checked);
+    renderAccountRecords(accountRecordsState);
+  });
+}
 
 btnExportAccountsCsv.addEventListener('click', () => {
   if (accountRecordsState.length === 0) {
