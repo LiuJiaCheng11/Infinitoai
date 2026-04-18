@@ -31,6 +31,7 @@ const MAX_CLOUDFLARE_CHECKBOX_ATTEMPTS = 12;
 const TMAILOR_SKIP_READY_COUNTDOWN = 25;
 const MAILBOX_PATROL_HEARTBEAT_MS = 15000;
 const CLOUDFLARE_PROGRESS_HEARTBEAT_MS = 10000;
+const TMAILOR_POPUP_AD_CLOUDFLARE_ERROR = 'TMailor popup ad tab opened during Cloudflare click. Mailbox reload requested.';
 const CLOUDFLARE_TURNSTILE_HOTSPOTS = [
   { xRatio: 0.12, yOffset: 0 },
   { xRatio: 0.16, yOffset: -6 },
@@ -490,6 +491,17 @@ function getMailboxReloadRecovery(error, options = {}) {
     };
   }
 
+  if (/TMailor popup ad tab opened during Cloudflare click/i.test(message)) {
+    if (options.popupAdLog || options.cloudflareLog) {
+      log(options.popupAdLog || options.cloudflareLog, 'warn');
+    }
+    return {
+      recovery: 'reload_mailbox',
+      reason: 'popup_ad_tab_opened',
+      error: message,
+    };
+  }
+
   if (/TMailor page did not finish loading mailbox controls/i.test(message)) {
     if (options.timeoutLog) {
       log(options.timeoutLog, 'warn');
@@ -727,6 +739,41 @@ async function requestDebuggerClickAt(rect) {
   if (response?.error) {
     throw new Error(response.error);
   }
+}
+
+async function throwIfTmailorPopupAdOpenedAfterClick(clickLabel = 'click', settleMs = 0) {
+  if (settleMs > 0) {
+    await sleep(settleMs);
+  }
+
+  let response = null;
+  try {
+    response = await chrome.runtime.sendMessage({
+      type: 'TMAILOR_CLOSE_POPUP_AD_TAB',
+      source: 'tmailor-mail',
+      payload: {
+        clickLabel,
+      },
+    });
+  } catch {
+    return;
+  }
+
+  if (!response?.popupClosed) {
+    return;
+  }
+
+  const closedUrl = Array.isArray(response.closedUrls) && response.closedUrls[0]
+    ? response.closedUrls[0]
+    : 'unknown url';
+  log(`TMailor: Cloudflare ${clickLabel} opened a new tab (${closedUrl}). Closing it and requesting mailbox reload.`, 'warn');
+  throw new Error(TMAILOR_POPUP_AD_CLOUDFLARE_ERROR);
+}
+
+async function clickCloudflareConfirmAndWait(confirmButton, clickLabel = 'confirm click') {
+  simulateClick(confirmButton);
+  await throwIfTmailorPopupAdOpenedAfterClick(clickLabel, 250);
+  await sleep(1200);
 }
 
 function isIgnoredCloseControl(el) {
@@ -1280,8 +1327,7 @@ async function ensureCloudflareChallengeClearedOrThrow(timeoutMs = DEFAULT_CLOUD
             `TMailor: Post-confirm probe reached ${postConfirmRetryDelayMs}ms without mailbox recovery. Token still exists, so retrying Confirm once (${describeElementForLog(confirmButton, 'confirm')}).`,
             'warn'
           );
-          simulateClick(confirmButton);
-          await sleep(1200);
+          await clickCloudflareConfirmAndWait(confirmButton, 'post-confirm retry click');
           continue;
         }
       }
@@ -1421,8 +1467,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
     });
     log(`TMailor: Cloudflare ${reason === 'post-click-check' ? 'verification finished right after the checkbox click, clicking Confirm' : 'retry window reached after checkbox verification, clicking Confirm'} (${describeElementForLog(confirmButton, 'confirm')}${lastCheckboxSource ? `; path=${lastCheckboxSource}` : ''})`, 'info');
     confirmAttemptCount += 1;
-    simulateClick(confirmButton);
-    await sleep(1200);
+    await clickCloudflareConfirmAndWait(confirmButton, `${reason} confirm click`);
     if (lastCheckboxSource) {
       log(`TMailor: Cloudflare verification path: ${lastCheckboxSource}`, 'info');
     }
@@ -1486,8 +1531,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
           });
           confirmAttemptCount += 1;
           log('TMailor: Cloudflare verification detected, clicking Confirm', 'info');
-          simulateClick(confirmButton);
-          await sleep(1200);
+          await clickCloudflareConfirmAndWait(confirmButton, 'challenge-hidden confirm click');
           return true;
         }
         await sleep(200);
@@ -1515,8 +1559,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
         });
         log(`TMailor: Cloudflare verification detected (tokenLength=${responseTokenLength}), clicking Confirm${lastCheckboxSource ? ` (path=${lastCheckboxSource})` : ''}`, 'info');
         confirmAttemptCount += 1;
-        simulateClick(confirmButton);
-        await sleep(1200);
+        await clickCloudflareConfirmAndWait(confirmButton, 'verification-signal confirm click');
         if (lastCheckboxSource) {
           log(`TMailor: Cloudflare verification path: ${lastCheckboxSource}`, 'info');
         }
@@ -1546,8 +1589,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
           confirmButton,
         });
         confirmAttemptCount += 1;
-        simulateClick(confirmButton);
-        await sleep(1200);
+        await clickCloudflareConfirmAndWait(confirmButton, 'visual-success auto confirm click');
         return true;
       }
     }
@@ -1606,8 +1648,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
           confirmButton,
         });
         confirmAttemptCount += 1;
-        simulateClick(confirmButton);
-        await sleep(1200);
+        await clickCloudflareConfirmAndWait(confirmButton, 'visual-success fallback confirm click');
         if (lastCheckboxSource) {
           log(`TMailor: Cloudflare verification path: ${lastCheckboxSource}`, 'info');
         }
@@ -1637,8 +1678,7 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
         });
         confirmAttemptCount += 1;
         lastConfirmAttemptAt = Date.now();
-        simulateClick(confirmButton);
-        await sleep(1200);
+        await clickCloudflareConfirmAndWait(confirmButton, 'enabled-confirm timeout fallback click');
         if (lastCheckboxSource) {
           log(`TMailor: Cloudflare verification path: ${lastCheckboxSource}`, 'info');
         }
@@ -1729,12 +1769,17 @@ async function waitForCloudflareConfirm(timeoutMs = DEFAULT_CLOUDFLARE_TIMEOUT_M
 
         try {
           await requestDebuggerClickAt(checkboxRect);
+          await throwIfTmailorPopupAdOpenedAfterClick(`${checkboxSource} checkbox click`);
         } catch (err) {
+          if (/TMailor popup ad tab opened during Cloudflare click/i.test(String(err?.message || err || ''))) {
+            throw err;
+          }
           if (String(checkboxTarget.tagName || '').toUpperCase() === 'IFRAME') {
             throw err;
           }
           log(`TMailor：Debugger 点击 Cloudflare 容器失败，改用 DOM 点击兜底：${err?.message || err}`, 'warn');
           simulateClick(checkboxTarget);
+          await throwIfTmailorPopupAdOpenedAfterClick(`${checkboxSource} checkbox fallback click`);
         }
 
         if (!loggedWaitingForVerificationResult) {
@@ -1902,6 +1947,7 @@ async function fetchTmailorEmail(payload = {}) {
 
   const initialRecovery = await waitForMailboxControlsWithRecovery(20000, {
     cloudflareLog: 'TMailor：首次处理邮箱挑战失败，准备请求后台重开邮箱页后重试。',
+    popupAdLog: 'TMailor：首次处理 Cloudflare 点击时误开了广告新标签页，已关闭广告标签，准备请求后台重开邮箱页后重试。',
     timeoutLog: 'TMailor：邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
   });
   if (initialRecovery) {
@@ -1943,6 +1989,7 @@ async function fetchTmailorEmail(payload = {}) {
     } catch (err) {
       const recovery = getMailboxReloadRecovery(err, {
         cloudflareLog: 'TMailor：生成邮箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+        popupAdLog: 'TMailor：Cloudflare 点击误开了广告新标签页，已关闭广告标签，准备请求后台重开邮箱页后重试。',
       });
       if (recovery) {
         return recovery;
@@ -2132,6 +2179,7 @@ async function refreshInbox(payload = {}) {
     assertNoManualTakeoverBlockers();
     const postRefreshRecovery = await waitForMailboxControlsWithRecovery(12000, {
       cloudflareLog: 'TMailor：刷新邮箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+      popupAdLog: 'TMailor：刷新邮箱时 Cloudflare 点击误开了广告新标签页，已关闭广告标签，准备请求后台重开邮箱页后重试。',
       timeoutLog: 'TMailor：刷新后的邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
     });
     if (postRefreshRecovery) {
@@ -2150,6 +2198,7 @@ async function refreshInbox(payload = {}) {
       assertNoManualTakeoverBlockers();
       const postNudgeRecovery = await waitForMailboxControlsWithRecovery(12000, {
         cloudflareLog: 'TMailor：触发邮箱首页容器后的 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+        popupAdLog: 'TMailor：触发邮箱首页容器后的 Cloudflare 点击误开了广告新标签页，已关闭广告标签，准备请求后台重开邮箱页后重试。',
         timeoutLog: 'TMailor：触发邮箱首页容器后页面长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
       });
       if (postNudgeRecovery) {
@@ -2174,6 +2223,7 @@ async function refreshInbox(payload = {}) {
     assertNoManualTakeoverBlockers();
     const postInboxRecovery = await waitForMailboxControlsWithRecovery(12000, {
       cloudflareLog: 'TMailor：返回收件箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+      popupAdLog: 'TMailor：返回收件箱时 Cloudflare 点击误开了广告新标签页，已关闭广告标签，准备请求后台重开邮箱页后重试。',
       timeoutLog: 'TMailor：返回收件箱后页面长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
     });
     if (postInboxRecovery) {
@@ -2448,6 +2498,7 @@ async function handlePollEmail(step, payload) {
 
   const initialRecovery = await waitForMailboxControlsWithRecovery(20000, {
     cloudflareLog: 'TMailor：轮询邮件前 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+    popupAdLog: 'TMailor：轮询邮件前 Cloudflare 点击误开了广告新标签页，已关闭广告标签，准备请求后台重开邮箱页后重试。',
     timeoutLog: 'TMailor：邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
   });
   if (initialRecovery) {
@@ -2482,6 +2533,7 @@ async function handlePollEmail(step, payload) {
       } catch (error) {
         const recovery = getMailboxReloadRecovery(error, {
           cloudflareLog: 'TMailor：刷新邮箱时 Cloudflare 自动处理失败，准备请求后台重开邮箱页后重试。',
+          popupAdLog: 'TMailor：刷新邮箱时 Cloudflare 点击误开了广告新标签页，已关闭广告标签，准备请求后台重开邮箱页后重试。',
           timeoutLog: 'TMailor：刷新后的邮箱页长时间未恢复可用状态，准备请求后台重开邮箱页后重试。',
         });
         if (recovery) {

@@ -2063,6 +2063,19 @@ async function handleMessage(message, sender) {
       return { ok: true };
     }
 
+    case 'TMAILOR_CLOSE_POPUP_AD_TAB': {
+      const senderTabId = sender.tab?.id;
+      const windowId = sender.tab?.windowId;
+      if (!Number.isFinite(senderTabId) || !Number.isFinite(windowId)) {
+        return { ok: true, popupClosed: false, closedTabIds: [], closedUrls: [] };
+      }
+      const result = await closeTmailorPopupAdTabs(senderTabId, windowId);
+      return {
+        ok: true,
+        ...result,
+      };
+    }
+
     default:
       console.warn(LOG_PREFIX, `Unknown message type: ${message.type}`);
       return { error: `Unknown message type: ${message.type}` };
@@ -2340,6 +2353,39 @@ async function requestStop() {
     logMessage: 'Stop requested. Cancelling current operations...',
     sendStoppedStatus: true,
   });
+}
+
+async function closeTmailorPopupAdTabs(senderTabId, windowId) {
+  if (!Number.isFinite(senderTabId) || !Number.isFinite(windowId)) {
+    return { popupClosed: false, closedTabIds: [], closedUrls: [] };
+  }
+
+  const tabs = await chrome.tabs.query({ windowId });
+  const popupTabs = tabs.filter((tab) => {
+    if (!Number.isFinite(tab?.id) || tab.id === senderTabId) {
+      return false;
+    }
+    if (tab.openerTabId !== senderTabId) {
+      return false;
+    }
+    return !/^https:\/\/tmailor\.com(?:\/|$)/i.test(String(tab.url || ''));
+  });
+
+  if (popupTabs.length === 0) {
+    return { popupClosed: false, closedTabIds: [], closedUrls: [] };
+  }
+
+  const closedTabIds = popupTabs.map((tab) => tab.id);
+  const closedUrls = popupTabs.map((tab) => String(tab.url || '')).filter(Boolean);
+  await chrome.tabs.remove(closedTabIds);
+  try {
+    await chrome.tabs.update(senderTabId, { active: true });
+  } catch {}
+  return {
+    popupClosed: true,
+    closedTabIds,
+    closedUrls,
+  };
 }
 
 // ============================================================
